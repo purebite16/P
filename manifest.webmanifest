@@ -1,0 +1,34 @@
+{
+ "id": "./",
+ "name": "PureBite — অনলাইন ক্যাটালগ",
+ "short_name": "PureBite",
+ "description": "PureBite-এর অনলাইন ক্যাটালগ ও অর্ডার",
+ "start_url": "./",
+ "scope": "./",
+ "display": "standalone",
+ "orientation": "portrait",
+ "background_color": "#ffffff",
+ "theme_color": "#0b3d22",
+ "lang": "bn",
+ "dir": "ltr",
+ "icons": [
+  {
+   "src": "icon-192.png",
+   "sizes": "192x192",
+   "type": "image/png",
+   "purpose": "any"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "any"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png",
+   "purpose": "maskable"
+  }
+ ]
+}
