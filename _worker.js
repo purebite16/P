@@ -62,7 +62,7 @@ async function putU(env, u) {
 async function findU(env, ident) { if (!ident) return null; const id = await env.KV.get('X:' + ident); return id ? getU(env, id) : null; }
 async function setIdx(env, u) { for (const k of [u.phone, u.email]) if (k) await env.KV.put('X:' + k, u.id); }
 async function affU(env, code) { if (!code) return null; const id = await env.KV.get('AF:' + code); if (!id) return null; const u = await getU(env, id); return u && u.comm && u.comm.st === 'approved' ? u : null; }
-async function getCfg(env) { return { rate: 10, wsPct: 10, wsNote: '', ...((await env.KV.get('CFG', 'json')) || {}) }; }
+async function getCfg(env) { return { rate: 10, wsPct: 10, wsNote: '', pp: {}, hide: [], ...((await env.KV.get('CFG', 'json')) || {}) }; }
 const newUser = (o) => ({ id: rndStr(12, 'abcdefghijklmnopqrstuvwxyz0123456789'), name: '', phone: '', email: '', addr: '', created: Date.now(), claimed: false, pv: 0, orders: [], cart: { items: [], ts: 0 }, reads: [], comm: { st: 'none', orders: [] }, ...o });
 function normIdent(s) {
   s = String(s || '').trim();
@@ -78,13 +78,26 @@ const pwErr = (p) => {
 };
 const meOf = (u) => ({ name: u.name, phone: u.phone || '', email: u.email || '', addr: u.addr || '', hasPw: !!u.hash, claimed: !!u.claimed, created: u.created, orders: (u.orders || []).slice(0, 100), cart: u.cart || { items: [], ts: 0 }, reads: (u.reads || []).slice(0, 60), comm: { st: (u.comm && u.comm.st) || 'none' } });
 function commStats(c) {
-  const rate = +c.rate || 0;
-  let ok = 0, pend = 0, nOk = 0, nPend = 0;
+  let ok = 0, pend = 0, rj = 0, nOk = 0, nPend = 0, nRj = 0, earned = 0, pendComm = 0;
   for (const o of c.orders || []) {
-    if (o.st === 'delivered') { ok += o.b; nOk++; } else if (o.st !== 'cancelled') { pend += o.b; nPend++; }
+    const cm = +o.c || 0;
+    if (o.st === 'cancelled' || o.rj) { rj += o.b; nRj++; }
+    else if (o.st === 'delivered') { ok += o.b; nOk++; earned += cm; }
+    else { pend += o.b; nPend++; pendComm += cm; }
   }
-  const earned = Math.round((ok * rate) / 100), paid = +c.paid || 0;
-  return { ok, pend, nOk, nPend, rate, earned, paid, due: Math.max(0, earned - paid), pendComm: Math.round((pend * rate) / 100) };
+  const paid = (+c.paid || 0) + (c.pays || []).reduce((a, x) => a + (+x.amt || 0), 0);
+  return { ok, pend, rj, nOk, nPend, nRj, earned, paid, due: Math.max(0, earned - paid), pendComm, clicks: (c.ck && c.ck.t) || 0, today: c.ck && c.ck.d === today() ? c.ck.n : 0 };
+}
+const today = () => new Date(Date.now() + 6 * 3600 * 1000).toISOString().slice(0, 10);
+const effPct = (cfg, name, rate) => {
+  if ((cfg.hide || []).includes(name)) return 0;
+  const v = cfg.pp && cfg.pp[name];
+  return v == null || v === '' ? +rate || 0 : +v || 0;
+};
+function calcComm(cfg, items, sub, cd, rate) {
+  if (sub <= 0) return 0;
+  const f = (sub - cd) / sub;
+  return Math.round(items.reduce((a, i) => a + (i.q * i.p * effPct(cfg, i.n, rate)) / 100, 0) * f);
 }
 
 // ---------- নোটিফিকেশন (WhatsApp + ইমেইল একসাথে) ----------
@@ -108,7 +121,7 @@ async function notifyOrder(env, o) {
   const text =
     `🛒 নতুন অর্ডার! ${o.ref}\n\nনাম: ${o.name}\nফোন: ${o.phone}\nঠিকানা: ${o.addr}, ${o.thana}, ${o.dist}\n\n${lines}\n\n` +
     `পণ্য: ৳${o.sub}${o.cd ? `\nছাড়: ৳${o.cd}` : ''}\nডেলিভারি (${o.zone}): ৳${o.ship}\nমোট: ৳${o.total}\nপেমেন্ট: ${o.pay}` +
-    (o.aff ? `\nরেফারেল কোড: ${o.aff}` : '') + (o.note ? `\nনোট: ${o.note}` : '');
+    (o.aff ? `\nরেফারেল কোড: ${o.aff} (${o.affn || ''}) কমিশন ৳${o.cm || 0}` : '') + (o.note ? `\nনোট: ${o.note}` : '');
   const rows = o.items.map((i) => `<tr><td style="padding:6px;border-bottom:1px solid #eee">${esc(i.n)}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:center">${i.q}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:right">৳${i.q * i.p}</td></tr>`).join('');
   const html =
     `<div style="font-family:sans-serif;max-width:520px;margin:auto;border:2px solid #c9a24a;border-radius:12px;overflow:hidden"><div style="background:#0f3d2e;color:#e6c675;padding:16px;font-size:20px">🛒 নতুন অর্ডার — ${esc(o.ref)}</div><div style="padding:16px">` +
@@ -289,8 +302,13 @@ async function userApi(p, request, env, ctx, u0) {
     const c = u.comm || { st: 'none' };
     if (c.st !== 'approved') return J({ ok: true, comm: { st: c.st || 'none' } });
     const cfg = await getCfg(env);
-    const s = commStats(c);
-    return J({ ok: true, comm: { st: 'approved', code: c.code, ...s, orders: (c.orders || []).slice(0, 40), ws: { pct: +cfg.wsPct || 0, note: cfg.wsNote || '' } } });
+    return J({ ok: true, comm: { st: 'approved', code: c.code, ...commStats(c), orders: (c.orders || []).slice(0, 100), pays: (c.pays || []).slice(0, 50).map((x) => ({ id: x.id, ts: x.ts, amt: x.amt, m: x.m, trx: x.trx, note: x.note, img: !!x.img })), dr: c.rate == null ? cfg.rate : c.rate, pp: cfg.pp || {}, hide: cfg.hide || [], ws: { pct: +cfg.wsPct || 0, note: cfg.wsNote || '' } } });
+  }
+  if (p === '/me/comm/proof') {
+    const c = u.comm || {};
+    const pay = (c.pays || []).find((x) => x.id === String(b.pid || ''));
+    if (!pay || !pay.img) return J({ ok: false, m: 'প্রমাণ নেই' });
+    return J({ ok: true, img: (await env.KV.get('IMG:' + u.id + ':' + pay.id)) || '' });
   }
   return J({ ok: false, m: 'not found' }, 404);
 }
@@ -301,13 +319,15 @@ async function adminApi(request, env, ctx) {
   if (!env.ADMIN_KEY) return J({ ok: false, m: 'ADMIN_KEY সেট করা নেই' }, 503, true);
   const ip = request.headers.get('CF-Connecting-IP') || 'x';
   const fk = new Request('https://fail.local/' + encodeURIComponent(ip));
-  if (await caches.default.match(fk)) return J({ ok: false, m: 'কিছুক্ষণ পরে চেষ্টা করুন' }, 429, true);
+  const fl = await caches.default.match(fk);
+  if (fl && +(await fl.clone().text()) >= 5) return J({ ok: false, m: 'অনেকবার ভুল। ১৫ মিনিট পরে চেষ্টা করুন' }, 429, true);
   const t = await request.text();
-  if (t.length > 30000) return J({ ok: false, m: 'অনুরোধ অনেক বড়' }, 413, true);
+  if (t.length > 700000) return J({ ok: false, m: 'অনুরোধ অনেক বড়' }, 413, true);
   let b = {};
   try { b = JSON.parse(t || '{}') || {}; } catch (e) { return J({ ok: false, m: 'ভুল অনুরোধ' }, 400, true); }
   if (!eq(await sha(b.key || ''), await sha(env.ADMIN_KEY))) {
-    await caches.default.put(fk, new Response('1', { headers: { 'Cache-Control': 'max-age=3' } }));
+    const n = (fl ? +(await fl.clone().text()) || 0 : 0) + 1;
+    await caches.default.put(fk, new Response(String(n), { headers: { 'Cache-Control': 'max-age=900' } }));
     return J({ ok: false, m: 'ভুল অ্যাডমিন কী' }, 401, true);
   }
   const R = (o, s) => J(o, s || 200, true);
@@ -344,6 +364,11 @@ async function adminApi(request, env, ctx) {
     if (b.rate !== undefined) c.rate = Math.min(100, Math.max(0, +b.rate || 0));
     if (b.wsPct !== undefined) c.wsPct = Math.min(90, Math.max(0, +b.wsPct || 0));
     if (b.wsNote !== undefined) c.wsNote = String(b.wsNote).slice(0, 400);
+    if (b.pp && typeof b.pp === 'object') {
+      c.pp = {};
+      for (const k of Object.keys(b.pp).slice(0, 400)) { const v = b.pp[k]; if (v !== '' && v != null && isFinite(+v)) c.pp[String(k).slice(0, 120)] = Math.min(100, Math.max(0, +v)); }
+    }
+    if (Array.isArray(b.hide)) c.hide = b.hide.slice(0, 400).map((x) => String(x).slice(0, 120));
     await env.KV.put('CFG', JSON.stringify(c));
     return R({ ok: true, cfg: c });
   }
@@ -369,7 +394,7 @@ async function adminApi(request, env, ctx) {
 
   if (a === 'get') {
     const c = u.comm;
-    return R({ ok: true, u: { id: u.id, name: u.name, phone: u.phone, email: u.email, addr: u.addr, claimed: !!u.claimed, created: u.created, pend: u.pend ? { code: u.pend.code } : null, cart: u.cart || { items: [] }, orders: (u.orders || []).map((o) => ({ id: o.id, ts: o.ts, st: o.st, total: o.total, pay: o.pay, dist: o.dist || '', items: o.items || [] })), reads: (u.reads || []).length, comm: { st: c.st || 'none', code: c.code || '', rate: c.rate == null ? '' : c.rate, note: c.note || '', ...commStats(c) } } });
+    return R({ ok: true, u: { id: u.id, name: u.name, phone: u.phone, email: u.email, addr: u.addr, claimed: !!u.claimed, created: u.created, pend: u.pend ? { code: u.pend.code } : null, cart: u.cart || { items: [] }, orders: (u.orders || []).map((o) => ({ id: o.id, ts: o.ts, st: o.st, total: o.total, pay: o.pay, dist: o.dist || '', items: o.items || [] })), reads: (u.reads || []).length, comm: { st: c.st || 'none', code: c.code || '', rate: c.rate == null ? '' : c.rate, note: c.note || '', orders: (c.orders || []).slice(0, 100), pays: (c.pays || []).map((x) => ({ id: x.id, ts: x.ts, amt: x.amt, m: x.m, trx: x.trx, note: x.note, img: !!x.img })), ...commStats(c) } } });
   }
   if (a === 'save') {
     const name = String(b.name || '').trim().slice(0, 60), addr = String(b.addr || '').trim().slice(0, 200);
@@ -426,9 +451,30 @@ async function adminApi(request, env, ctx) {
   if (a === 'cpay') {
     const amt = Math.round(+b.amount || 0);
     if (!(amt > 0)) return R({ ok: false, m: 'টাকার পরিমাণ দিন' });
-    u.comm.paid = (+u.comm.paid || 0) + amt;
+    const pid = 'P' + Date.now().toString(36) + rndStr(3);
+    const img = String(b.img || '');
+    if (img && (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(img) || img.length > 600000)) return R({ ok: false, m: 'ছবি ঠিক নয় বা বড়' });
+    u.comm.pays = [{ id: pid, ts: Date.now(), amt, m: String(b.method || '').slice(0, 20), trx: String(b.trx || '').slice(0, 40), note: String(b.note || '').slice(0, 120), img: !!img }].concat(u.comm.pays || []).slice(0, 200);
+    if (img) await env.KV.put('IMG:' + u.id + ':' + pid, img);
     await putU(env, u);
     return R({ ok: true });
+  }
+  if (a === 'cpaydel') {
+    const pid = String(b.pid || '');
+    u.comm.pays = (u.comm.pays || []).filter((x) => x.id !== pid);
+    await env.KV.delete('IMG:' + u.id + ':' + pid);
+    await putU(env, u);
+    return R({ ok: true });
+  }
+  if (a === 'proof') {
+    return R({ ok: true, img: (await env.KV.get('IMG:' + u.id + ':' + String(b.pid || ''))) || '' });
+  }
+  if (a === 'crj') {
+    const o = (u.comm.orders || []).find((x) => x.id === String(b.oid || ''));
+    if (!o) return R({ ok: false, m: 'অর্ডার নেই' });
+    o.rj = o.rj ? 0 : 1;
+    await putU(env, u);
+    return R({ ok: true, rj: o.rj });
   }
   return R({ ok: false, m: 'not found' }, 404);
 }
@@ -480,8 +526,12 @@ async function orderApi(request, env, ctx, u) {
       await putU(env, cu); await setIdx(env, cu);
     }
     if (au) {
-      au.comm.orders = [{ id: ref, ts: Date.now(), st: 'new', b: Math.max(0, sub - cd), n: name.slice(0, 30) }].concat(au.comm.orders || []).slice(0, 300);
+      const cfg = await getCfg(env);
+      const cm = calcComm(cfg, items, sub, cd, au.comm.rate == null ? cfg.rate : au.comm.rate);
+      au.comm.orders = [{ id: ref, ts: Date.now(), st: 'new', b: Math.max(0, sub - cd), c: cm, n: name.slice(0, 30) }].concat(au.comm.orders || []).slice(0, 300);
       await putU(env, au);
+      order.cm = cm; order.affn = au.name;
+      await env.KV.put(ref, JSON.stringify(order));
     }
     ctx.waitUntil(notifyOrder(env, order).catch(() => {}));
     return J({ ok: true, ref, sub, cd, ship: z[1], total, zone: z[0], ...(ck ? { ck } : {}) });
@@ -492,13 +542,29 @@ async function orderApi(request, env, ctx, u) {
 
 const ALLOW = ['https://purebite16.github.io'];
 const okOrigin = (og, u) => og === u.origin || ALLOW.includes(og);
-const USER_PATHS = new Set(['/register', '/login', '/claim', '/otp/send', '/otp/verify', '/me', '/me/cart', '/me/read', '/me/update', '/me/password', '/me/comm', '/me/comm/request']);
+const USER_PATHS = new Set(['/register', '/login', '/claim', '/otp/send', '/otp/verify', '/me', '/me/cart', '/me/read', '/me/update', '/me/password', '/me/comm', '/me/comm/request', '/me/comm/proof']);
+
+async function refHit(request, env) {
+  const ip = request.headers.get('CF-Connecting-IP') || 'x';
+  let b = {};
+  try { b = JSON.parse((await request.text()).slice(0, 500) || '{}'); } catch (e) { return J({ ok: false }); }
+  const code = String(b.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+  if (code.length < 3 || (await hit('rf-' + code, ip, 3600)) || (await hit('rfip', ip, 5))) return J({ ok: true });
+  const au = await affU(env, code);
+  if (!au) return J({ ok: true });
+  const d = today();
+  au.comm.ck = au.comm.ck && au.comm.ck.d === d ? au.comm.ck : { d, n: 0, t: (au.comm.ck && au.comm.ck.t) || 0 };
+  au.comm.ck.n++; au.comm.ck.t++;
+  await putU(env, au);
+  return J({ ok: true });
+}
 
 const handle = async (request, env, ctx) => {
     const u = new URL(request.url);
     const p = u.pathname.replace(/\/+$/, '') || '/';
     if (p === '/admin' && (request.method === 'POST' || request.method === 'OPTIONS')) return adminApi(request, env, ctx);
     if (p === '/api/orders') return orderApi(request, env, ctx, u);
+    if (p === '/api/ref' && request.method === 'POST') return refHit(request, env);
     if (USER_PATHS.has(p) && request.method === 'POST') {
       const og = request.headers.get('Origin');
       if (og && !okOrigin(og, u)) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
@@ -512,13 +578,18 @@ export default {
     const u = new URL(request.url);
     const p = u.pathname.replace(/\/+$/, '') || '/';
     const og = request.headers.get('Origin');
-    const api = p === '/api/orders' || USER_PATHS.has(p);
+    const api = p === '/api/orders' || p === '/api/ref' || USER_PATHS.has(p);
     const cors = api && og && okOrigin(og, u) ? { 'Access-Control-Allow-Origin': og, 'Access-Control-Allow-Headers': 'Content-Type, Authorization', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Max-Age': '600', Vary: 'Origin' } : null;
     if (api && request.method === 'OPTIONS') return new Response(null, { status: cors ? 204 : 403, headers: cors || {} });
     const r = await handle(request, env, ctx);
-    if (!cors) return r;
     const h = new Headers(r.headers);
-    for (const k in cors) h.set(k, cors[k]);
+    h.set('X-Content-Type-Options', 'nosniff');
+    h.set('X-Frame-Options', 'DENY');
+    h.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    h.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    h.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+    if (p === '/admin.html' || p === '/admin') h.set('X-Robots-Tag', 'noindex, nofollow');
+    if (cors) for (const k in cors) h.set(k, cors[k]);
     return new Response(r.body, { status: r.status, headers: h });
   },
 };

@@ -54,6 +54,11 @@ input.t{width:100%;padding:12px;border:1.5px solid #cfd8d2;border-radius:10px;ma
 #tabs{margin-bottom:10px}.u{background:var(--card);border-radius:12px;padding:11px 13px;margin-bottom:9px;border-left:5px solid var(--gold);cursor:pointer}.u b{color:var(--g)}.u small{color:var(--mut);display:block}
 .tg{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:10px;background:#e8f1ec;color:var(--g2);margin:3px 3px 0 0}.tg.r{background:#fde7e5;color:var(--red)}.tg.y{background:#fff3cd;color:#8a6500}
 .det{background:var(--card);border-radius:14px;padding:14px;border:2px solid var(--gold)}.det h3{color:var(--g);margin-bottom:6px}.det .r{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #ddd;font-size:14px;gap:8px}.det .acts{margin-top:10px}
+
+.sumbox{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:10px 0}.sumbox>div{background:#f4f1e8;border-radius:10px;padding:8px 4px;text-align:center}.sumbox small{display:block;font-size:11px;color:var(--mut)}.sumbox b{font-size:15px;color:var(--g)}
+.ro{border:1px solid #e3ddc9;border-radius:10px;padding:8px 10px;margin:6px 0;font-size:14px}.ro .rh{display:flex;justify-content:space-between;gap:6px;font-weight:600}.ro .rc{color:var(--mut);margin:3px 0}.mini{border:1.5px solid var(--g2);background:#fff;color:var(--g2);border-radius:8px;padding:4px 9px;font-size:13px;cursor:pointer;margin-right:4px}
+.payf{background:#f9f6ea;border-radius:12px;padding:10px;margin-top:8px}.payf .t,select.t{margin-bottom:8px}.fl{display:block;font-size:13px;margin-bottom:8px}
+.pr{display:grid;grid-template-columns:1fr 70px 38px;gap:6px;align-items:center;padding:6px 0;border-bottom:1px dashed #ddd;font-size:13px}.pr input[type=number]{width:100%;padding:6px;border:1.5px solid #cfd8d2;border-radius:8px}
 @media print{header,.bar,.chips,.acts,.stats{display:none}.o{break-inside:avoid;box-shadow:none;border:1px solid #999}}
 </style>
 </head>
@@ -138,6 +143,7 @@ function card(o){
   +'<div class="tot"><span>ডেলিভারি ('+esc(o.zone)+')</span><span>'+money(o.ship)+'</span></div>'
   +'<div class="gt"><span>মোট</span><span>'+money(o.total)+'</span></div>'
   +'<div class="tot" style="margin-bottom:8px"><span>পেমেন্ট</span><span>'+esc(o.pay)+'</span></div>'
+  +(o.aff?'<div class="note" style="background:#e8f6ee">🤝 রেফারেল: <b>'+esc(o.aff)+'</b> ('+esc(o.affn||'')+') — সদস্যের কমিশন <b>'+money(o.cm||0)+'</b></div>':'')
   +(o.note?'<div class="note">📝 '+esc(o.note)+'</div>':'')
   +'<div class="acts"><a href="tel:'+ph+'">📞 কল</a><a class="wa" href="'+wa+'?text='+msg+'" target="_blank" rel="noopener">WhatsApp</a>'
   +'<select data-ref="'+esc(o.ref)+'" class="st">'+ST.map(s=>'<option'+(s===st?' selected':'')+'>'+s+'</option>').join('')+'</select>'
@@ -160,6 +166,7 @@ $('#list').addEventListener('click',async e=>{
 });
 
 /* ---- ট্যাব, কাস্টমার, কমিশন ---- */
+function shrink(f){return new Promise((res,rej)=>{const im=new Image(),u=URL.createObjectURL(f);im.onload=()=>{const m=1100,k=Math.min(1,m/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*k);c.height=Math.round(im.height*k);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(u);res(c.toDataURL('image/jpeg',.72))};im.onerror=()=>rej(new Error('ছবি পড়া যায়নি'));im.src=u})}
 let TAB='o',CUS=[],CFG={};
 const CM_BN={none:'',pending:'কমিশন আবেদন',approved:'কমিশন সদস্য',rejected:'কমিশন বাতিল'};
 document.getElementById('tabs').onclick=async e=>{const t=e.target.dataset.tb;if(!t)return;TAB=t;
@@ -181,8 +188,12 @@ async function openU(id){try{const j=await api('get',{id});const u=j.u,c=u.comm;
    +'<div class="r"><span>অ্যাকাউন্ট</span><b>'+(u.claimed?'চালু':'চালু হয়নি')+'</b></div><div class="r"><span>ব্লগ পড়েছে</span><b>'+bn(u.reads)+'টি</b></div>'
    +(u.pend?'<div class="note">🔔 অ্যাকাউন্ট চালুর আবেদন — যাচাই কোড: <b>'+esc(u.pend.code)+'</b></div><div class="acts"><button data-x="approve">✅ অনুমোদন</button><button class="del" data-x="reject">❌ বাতিল</button></div>':'')
    +'<h3 style="margin-top:14px">💼 কমিশন: '+(CM_BN[c.st]||'সদস্য নন')+'</h3>'
-   +(c.st==='approved'?'<div class="r"><span>কোড</span><b>'+esc(c.code)+'</b></div><div class="r"><span>হার</span><b>'+bn(c.rate)+'%</b></div><div class="r"><span>সফল অর্ডার (পণ্যমূল্য)</span><b>'+money(c.ok)+'</b></div><div class="r"><span>পেন্ডিং</span><b>'+money(c.pend)+'</b></div><div class="r"><span>মোট কমিশন</span><b>'+money(c.earned)+'</b></div><div class="r"><span>পরিশোধ</span><b>'+money(c.paid)+'</b></div><div class="r"><span>বাকি</span><b>'+money(c.due)+'</b></div>':'')
-   +'<div class="acts"><button data-x="capprove">✅ কমিশন অনুমোদন / হার বদল</button>'+(c.st==='approved'?'<button data-x="cpay">💸 পরিশোধ লিখুন</button>':'')+'<button class="del" data-x="creject">কমিশন বাতিল</button></div>'
+   +(c.st==='approved'?'<div class="r"><span>কোড</span><b>'+esc(c.code)+'</b></div><div class="r"><span>সদস্যের ডিফল্ট হার</span><b>'+bn(c.rate===''?(CFG.rate||0):c.rate)+'%</b></div><div class="r"><span>লিংকে ক্লিক</span><b>মোট '+bn(c.clicks)+' · আজ '+bn(c.today)+'</b></div>'
+    +'<div class="sumbox"><div><small>মোট বিক্রি (সফল)</small><b>'+money(c.ok)+'</b></div><div><small>কমিশন (সফল)</small><b>'+money(c.earned)+'</b></div><div><small>গড় হার</small><b>'+(c.ok?bn((c.earned*100/c.ok).toFixed(1)):'০')+'%</b></div><div><small>পরিশোধ</small><b>'+money(c.paid)+'</b></div><div><small>বাকি</small><b style="color:var(--red)">'+money(c.due)+'</b></div><div><small>পেন্ডিং বিক্রি</small><b>'+money(c.pend)+'</b></div></div>'
+    +'<h3 style="margin-top:12px">🤝 রেফারেল অর্ডার ও কমিশন</h3>'+(c.orders.length?c.orders.map(o=>{const rj=o.st==='cancelled'||o.rj;const lab=rj?'রিজেক্ট':o.st==='delivered'?'সফল':'পেন্ডিং';return '<div class="ro"><div class="rh"><span>#'+esc(o.id)+' · '+esc(o.n||'')+'</span><span class="badge '+(rj?'c':o.st==='delivered'?'d':'n')+'">'+lab+'</span></div><div class="rc">'+money(o.b)+' বিক্রিতে কমিশন <b>'+money(o.c||0)+'</b> <small>('+(o.b?bn(((o.c||0)*100/o.b).toFixed(1)):'০')+'%)</small></div>'+(o.st==='cancelled'?'':'<button class="mini" data-x="crj" data-o="'+esc(o.id)+'">'+(o.rj?'↩ আবার গ্রহণ':'✖ রিজেক্ট করুন')+'</button>')+'</div>'}).join(''):'<div class="empty" style="padding:8px">কোনো রেফারেল অর্ডার নেই</div>')
+    +'<h3 style="margin-top:12px">💸 পরিশোধ</h3>'+(c.pays.length?c.pays.map(x=>'<div class="ro"><div class="rh"><span>'+money(x.amt)+' · '+esc(x.m||'')+'</span><small>'+new Date(x.ts).toLocaleDateString('bn-BD')+'</small></div><div class="rc">'+(x.trx?'TrxID: '+esc(x.trx)+' ':'')+esc(x.note||'')+'</div>'+(x.img?'<button class="mini" data-x="proof" data-p="'+esc(x.id)+'">📎 প্রমাণ দেখুন</button> ':'')+'<button class="mini" data-x="cpaydel" data-p="'+esc(x.id)+'">🗑</button></div>').join(''):'<div class="empty" style="padding:8px">এখনো পরিশোধ নেই</div>')
+    +'<div class="payf"><input class="t" id="pa" type="number" placeholder="টাকার পরিমাণ"><select class="t" id="pm"><option>বিকাশ</option><option>নগদ</option><option>রকেট</option><option>ব্যাংক</option><option>নগদ টাকা</option></select><input class="t" id="pt" placeholder="TrxID / রেফারেন্স (ঐচ্ছিক)"><input class="t" id="pn" placeholder="নোট (ঐচ্ছিক)"><label class="fl">📎 স্ক্রিনশট/রসিদ (ঐচ্ছিক)<input type="file" id="pf" accept="image/*"></label><button class="btn" data-x="cpay">✅ পরিশোধ সংরক্ষণ করুন</button></div>':'')
+   +'<div class="acts"><button data-x="capprove">✅ কমিশন অনুমোদন / হার বদল</button>'+'<button class="del" data-x="creject">কমিশন বাতিল</button></div>'
    +'<h3 style="margin-top:14px">🧾 অর্ডার ('+bn(u.orders.length)+')</h3>'+od
    +'<div class="acts" style="margin-top:14px"><button data-x="setpw">🔑 পাসওয়ার্ড সেট</button><button data-x="edit">✏️ তথ্য বদল</button><button class="del" data-x="del">🗑 অ্যাকাউন্ট মুছুন</button></div></div>';
   $('#bk').onclick=()=>loadCus().catch(()=>{});
@@ -192,16 +203,28 @@ async function openU(id){try{const j=await api('get',{id});const u=j.u,c=u.comm;
     else if(x==='reject'){await api('reject',{id});toast('বাতিল')}
     else if(x==='capprove'){const r=prompt('কমিশন হার (%)',c.rate===''?CFG.rate||10:c.rate);if(r===null)return;const cd=prompt('রেফারেল কোড (ফাঁকা রাখলে অটো)',c.code||'');if(cd===null)return;const k=await api('cset',{id,st:'approved',rate:r,code:cd});toast('অনুমোদিত ✓ কোড: '+k.code)}
     else if(x==='creject'){if(!confirm('কমিশন সদস্যপদ বাতিল করবেন?'))return;await api('cset',{id,st:'rejected'});toast('বাতিল')}
-    else if(x==='cpay'){const a=prompt('কত টাকা পরিশোধ করেছেন?');if(!a)return;await api('cpay',{id,amount:a});toast('লেখা হয়েছে ✓')}
+    else if(x==='cpay'){const a=$('#pa').value;if(!a)return toast('টাকার পরিমাণ দিন');let img='';const f=$('#pf').files[0];if(f)img=await shrink(f);await api('cpay',{id,amount:a,method:$('#pm').value,trx:$('#pt').value,note:$('#pn').value,img});toast('সংরক্ষিত ✓')}
+    else if(x==='cpaydel'){if(!confirm('এই পরিশোধের এন্ট্রি মুছবেন?'))return;await api('cpaydel',{id,pid:ev.target.dataset.p});toast('মুছে গেছে')}
+    else if(x==='crj'){await api('crj',{id,oid:ev.target.dataset.o});toast('আপডেট হয়েছে')}
+    else if(x==='proof'){const k=await api('proof',{id,pid:ev.target.dataset.p});if(!k.img)return toast('ছবি নেই');const w=window.open();if(w){w.document.write('<img style="max-width:100%" src="'+k.img+'">')}else toast('পপআপ আটকেছে');return}
     else if(x==='setpw'){const pw=prompt('নতুন পাসওয়ার্ড (ছোট+বড় হাতের অক্ষর, সংখ্যা ও চিহ্ন, ৮+)');if(!pw)return;await api('setpw',{id,password:pw});toast('পাসওয়ার্ড সেট ✓')}
     else if(x==='edit'){const n=prompt('নাম',u.name);if(n===null)return;const ph=prompt('মোবাইল',u.phone||'');if(ph===null)return;const em=prompt('ইমেইল',u.email||'');if(em===null)return;const ad=prompt('ঠিকানা',u.addr||'');if(ad===null)return;await api('save',{id,name:n,phone:ph,email:em,addr:ad});toast('সেভ ✓')}
     else if(x==='del'){if(!confirm('অ্যাকাউন্ট স্থায়ীভাবে মুছবেন?'))return;await api('del',{id});toast('মুছে গেছে');return loadCus()}
     openU(id)}catch(err){toast(err.message)}};
  }catch(x){toast(x.message)}}
-async function loadCfg(){const j=await api('cfg');CFG=j.cfg;
-  $('#pS').innerHTML='<div class="det"><h3>⚙️ কমিশন ও পাইকারী সেটিংস</h3><p style="font-size:13px;color:var(--mut);margin:4px 0 10px">নতুন সদস্যের ডিফল্ট কমিশন হার এবং পাইকারী দাম = খুচরা দামের চেয়ে কত % কম।</p>'
-  +'<label>ডিফল্ট কমিশন (%)</label><input class="t" id="cf1" type="number" value="'+esc(CFG.rate)+'"><label>পাইকারী ছাড় (%)</label><input class="t" id="cf2" type="number" value="'+esc(CFG.wsPct)+'"><label>পাইকারী নোট (ঐচ্ছিক, যেমন ন্যূনতম অর্ডার)</label><input class="t" id="cf3" value="'+esc(CFG.wsNote||'')+'"><button class="btn" id="cfs">সেভ করুন</button></div>';
-  $('#cfs').onclick=async()=>{try{await api('cfgset',{rate:$('#cf1').value,wsPct:$('#cf2').value,wsNote:$('#cf3').value});toast('সেভ হয়েছে ✓')}catch(x){toast(x.message)}}}
+let PLIST=[];
+async function loadProducts(){try{const t=await (await fetch('/',{cache:'no-store'})).text();const m=t.match(/<script type="application\/json" id="appdata">([\s\S]*?)<\/script>/);if(!m)return[];const d=JSON.parse(m[1]);return (d.products||[]).filter(p=>p.price>0).map(p=>({n:(p.group||p.name)+(p.size?' '+p.size:''),p:p.price}))}catch(e){return[]}}
+async function loadCfg(){const j=await api('cfg');CFG=j.cfg;PLIST=await loadProducts();
+  const hide=new Set(CFG.hide||[]),pp=CFG.pp||{};
+  const names=new Set(PLIST.map(x=>x.n));const extra=[...Object.keys(pp),...hide].filter(n=>!names.has(n)).map(n=>({n,p:0}));
+  const rows=PLIST.concat(extra);
+  $('#pS').innerHTML='<div class="det"><h3>⚙️ কমিশন ও পাইকারী সেটিংস</h3><p style="font-size:13px;color:var(--mut);margin:4px 0 10px">ডিফল্ট কমিশন নতুন সদস্যের জন্য। পণ্যের ঘরে % দিলে ওই পণ্যে সেই হার চলবে (ফাঁকা = সদস্যের ডিফল্ট)। ✔ চিহ্ন তুললে পণ্যটি সদস্যদের তালিকা থেকে বন্ধ থাকবে ও কমিশন পাবে না।</p>'
+  +'<label>ডিফল্ট কমিশন (%)</label><input class="t" id="cf1" type="number" value="'+esc(CFG.rate)+'"><label>পাইকারী ছাড় (%)</label><input class="t" id="cf2" type="number" value="'+esc(CFG.wsPct)+'"><label>পাইকারী নোট (ঐচ্ছিক)</label><input class="t" id="cf3" value="'+esc(CFG.wsNote||'')+'">'
+  +'<h3 style="margin:10px 0 4px">📦 পণ্যভিত্তিক কমিশন</h3>'+(PLIST.length?'':'<div class="note">ক্যাটালগের পণ্যের তালিকা পাওয়া যায়নি। ক্যাটালগ (index.html) আপলোড করা আছে কিনা দেখুন।</div>')
+  +'<div class="pr" style="font-weight:700"><span>পণ্য</span><span>কমিশন %</span><span>খোলা</span></div>'
+  +rows.map((x,i)=>'<div class="pr"><span>'+esc(x.n)+'<br><small style="color:var(--mut)">'+(x.p?money(x.p):'')+'</small></span><input type="number" step="0.5" min="0" max="100" data-pn="'+i+'" value="'+(pp[x.n]!=null?esc(pp[x.n]):'')+'" placeholder="ডিফল্ট"><input type="checkbox" data-hn="'+i+'" '+(hide.has(x.n)?'':'checked')+'></div>').join('')
+  +'<button class="btn" id="cfs" style="margin-top:12px">সেভ করুন</button></div>';
+  $('#cfs').onclick=async()=>{try{const ppn={},hd=[];rows.forEach((x,i)=>{const v=document.querySelector('[data-pn="'+i+'"]').value;if(v!=='')ppn[x.n]=v;if(!document.querySelector('[data-hn="'+i+'"]').checked)hd.push(x.n)});await api('cfgset',{rate:$('#cf1').value,wsPct:$('#cf2').value,wsNote:$('#cf3').value,pp:ppn,hide:hd});toast('সেভ হয়েছে ✓')}catch(x){toast(x.message)}}}
 const hdr=document.createElement('header');
 hdr.innerHTML='<div class="logo"><img src="logo.jpg" alt="" onerror="this.remove()"></div><div><h1>PureBite</h1><small>অর্ডার ম্যানেজমেন্ট</small></div><div class="sp"></div><button class="hb" id="rf">↻</button><button class="hb" id="lo">বের হন</button>';
 hdr.style.display='none';
