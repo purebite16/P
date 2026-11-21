@@ -437,7 +437,7 @@ async function adminApi(request, env, ctx) {
 async function orderApi(request, env, ctx, u) {
   if (request.method !== 'POST') return J({ ok: false, m: 'method' }, 405);
   const og = request.headers.get('Origin');
-  if (og && og !== u.origin) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
+  if (og && !okOrigin(og, u)) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
   const rk = new Request('https://rl.local/' + encodeURIComponent(request.headers.get('CF-Connecting-IP') || 'x'));
   if (await caches.default.match(rk)) return J({ ok: false, m: 'একটু অপেক্ষা করে আবার চেষ্টা করুন' }, 429);
   try {
@@ -490,19 +490,35 @@ async function orderApi(request, env, ctx, u) {
   }
 }
 
+const ALLOW = ['https://purebite16.github.io'];
+const okOrigin = (og, u) => og === u.origin || ALLOW.includes(og);
 const USER_PATHS = new Set(['/register', '/login', '/claim', '/otp/send', '/otp/verify', '/me', '/me/cart', '/me/read', '/me/update', '/me/password', '/me/comm', '/me/comm/request']);
 
-export default {
-  async fetch(request, env, ctx) {
+const handle = async (request, env, ctx) => {
     const u = new URL(request.url);
     const p = u.pathname.replace(/\/+$/, '') || '/';
     if (p === '/admin' && (request.method === 'POST' || request.method === 'OPTIONS')) return adminApi(request, env, ctx);
     if (p === '/api/orders') return orderApi(request, env, ctx, u);
     if (USER_PATHS.has(p) && request.method === 'POST') {
       const og = request.headers.get('Origin');
-      if (og && og !== u.origin) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
+      if (og && !okOrigin(og, u)) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
       try { return await userApi(p, request, env, ctx); } catch (e) { return J({ ok: false, m: 'সার্ভারে সমস্যা হয়েছে। আবার চেষ্টা করুন' }, 500); }
     }
     return env.ASSETS.fetch(request);
+};
+
+export default {
+  async fetch(request, env, ctx) {
+    const u = new URL(request.url);
+    const p = u.pathname.replace(/\/+$/, '') || '/';
+    const og = request.headers.get('Origin');
+    const api = p === '/api/orders' || USER_PATHS.has(p);
+    const cors = api && og && okOrigin(og, u) ? { 'Access-Control-Allow-Origin': og, 'Access-Control-Allow-Headers': 'Content-Type, Authorization', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Max-Age': '600', Vary: 'Origin' } : null;
+    if (api && request.method === 'OPTIONS') return new Response(null, { status: cors ? 204 : 403, headers: cors || {} });
+    const r = await handle(request, env, ctx);
+    if (!cors) return r;
+    const h = new Headers(r.headers);
+    for (const k in cors) h.set(k, cors[k]);
+    return new Response(r.body, { status: r.status, headers: h });
   },
 };
