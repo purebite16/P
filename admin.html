@@ -51,12 +51,15 @@ input.t{width:100%;padding:12px;border:1.5px solid #cfd8d2;border-radius:10px;ma
 .empty{text-align:center;color:var(--mut);padding:40px 10px}
 #more{display:none;margin:6px auto 30px;width:auto}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--g);color:var(--gold2);padding:10px 18px;border-radius:20px;display:none;z-index:9}
+#tabs{margin-bottom:10px}.u{background:var(--card);border-radius:12px;padding:11px 13px;margin-bottom:9px;border-left:5px solid var(--gold);cursor:pointer}.u b{color:var(--g)}.u small{color:var(--mut);display:block}
+.tg{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:10px;background:#e8f1ec;color:var(--g2);margin:3px 3px 0 0}.tg.r{background:#fde7e5;color:var(--red)}.tg.y{background:#fff3cd;color:#8a6500}
+.det{background:var(--card);border-radius:14px;padding:14px;border:2px solid var(--gold)}.det h3{color:var(--g);margin-bottom:6px}.det .r{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #ddd;font-size:14px;gap:8px}.det .acts{margin-top:10px}
 @media print{header,.bar,.chips,.acts,.stats{display:none}.o{break-inside:avoid;box-shadow:none;border:1px solid #999}}
 </style>
 </head>
 <body>
 <div id="login">
-  <div class="logo"><img src="logo.png" alt="" onerror="this.remove();this.parentNode&&(this.parentNode.textContent='B')"></div>
+  <div class="logo"><img src="logo.jpg" alt="" onerror="this.remove();this.parentNode&&(this.parentNode.textContent='B')"></div>
   <h2>PureBite</h2>
   <p>অ্যাডমিন অর্ডার প্যানেল</p>
   <input class="t" id="key" type="password" placeholder="অ্যাডমিন কী" autocomplete="current-password">
@@ -65,6 +68,8 @@ input.t{width:100%;padding:12px;border:1.5px solid #cfd8d2;border-radius:10px;ma
 </div>
 
 <div id="app">
+  <div class="chips" id="tabs"><button class="chip on" data-tb="o">🧾 অর্ডার</button><button class="chip" data-tb="c">👥 কাস্টমার</button><button class="chip" data-tb="s">⚙️ কমিশন সেটিংস</button></div>
+  <div id="pO">
   <div class="stats">
     <div class="stat"><b id="s1">0</b><span>নতুন অর্ডার</span></div>
     <div class="stat"><b id="s2">0</b><span>আজকের অর্ডার</span></div>
@@ -74,6 +79,9 @@ input.t{width:100%;padding:12px;border:1.5px solid #cfd8d2;border-radius:10px;ma
   <div class="chips" id="chips"></div>
   <div id="list"></div>
   <button class="btn" id="more">আরও পুরোনো অর্ডার</button>
+  </div>
+  <div id="pC" style="display:none"><div class="bar"><input id="cq" type="search" placeholder="নাম, ফোন বা ইমেইল খুঁজুন"></div><div id="cl"></div></div>
+  <div id="pS" style="display:none"></div>
 </div>
 <div id="toast"></div>
 
@@ -86,15 +94,16 @@ const bn=n=>String(n).replace(/\d/g,d=>'০১২৩৪৫৬৭৮৯'[d]);
 const money=n=>'৳'+bn(Number(n).toLocaleString('en-IN'));
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',2200)}
-async function api(p,body){
-  const r=await fetch(p,{method:body?'POST':'GET',headers:{'x-admin-key':KEY,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+const SB={new:'নতুন',packing:'প্যাকিং',shipped:'পাঠানো হয়েছে',delivered:'ডেলিভারি হয়েছে',cancelled:'বাতিল'},BS=Object.fromEntries(Object.entries(SB).map(([k,v])=>[v,k]));
+async function api(a,x){
+  const r=await fetch('/admin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:KEY,a,...(x||{})})});
   const j=await r.json().catch(()=>({ok:false,m:'সার্ভারের উত্তর বোঝা যায়নি'}));
   if(!j.ok)throw new Error(j.m||'ত্রুটি');return j;
 }
 async function load(more){
   try{
-    const j=await api('/api/admin/orders'+(more&&MORE?'?before='+MORE:''));
-    ORD=more?ORD.concat(j.orders):j.orders;MORE=j.more;
+    const j=await api('orders',more&&MORE?{before:MORE}:{});
+    j.orders.forEach(o=>o.st=SB[o.st]||o.st);ORD=more?ORD.concat(j.orders):j.orders;MORE=j.more;
     $('#login').style.display='none';$('#app').style.display='block';
     try{sessionStorage.setItem('pbk',KEY)}catch(e){}
     render();clearInterval(TIMER);TIMER=setInterval(()=>load(false).catch(()=>{}),60000);
@@ -142,15 +151,59 @@ $('#chips').onclick=e=>{const c=e.target.dataset.c;if(c){FIL=c;render()}};
 $('#list').addEventListener('change',async e=>{
   if(!e.target.classList.contains('st'))return;
   const ref=e.target.dataset.ref,st=e.target.value;
-  try{await api('/api/admin/status',{ref,st});ORD.find(o=>o.ref===ref).st=st;render();toast('স্ট্যাটাস বদলানো হয়েছে')}catch(x){toast(x.message);render()}
+  try{await api('ost',{oid:ref,st:BS[st]});ORD.find(o=>o.ref===ref).st=st;render();toast('স্ট্যাটাস বদলানো হয়েছে')}catch(x){toast(x.message);render()}
 });
 $('#list').addEventListener('click',async e=>{
   const ref=e.target.dataset.del;if(!ref)return;
   if(!confirm('অর্ডার '+ref+' স্থায়ীভাবে মুছে ফেলবেন?'))return;
-  try{await api('/api/admin/delete',{ref});ORD=ORD.filter(o=>o.ref!==ref);render();toast('মুছে ফেলা হয়েছে')}catch(x){toast(x.message)}
+  try{await api('odel',{ref});ORD=ORD.filter(o=>o.ref!==ref);render();toast('মুছে ফেলা হয়েছে')}catch(x){toast(x.message)}
 });
+
+/* ---- ট্যাব, কাস্টমার, কমিশন ---- */
+let TAB='o',CUS=[],CFG={};
+const CM_BN={none:'',pending:'কমিশন আবেদন',approved:'কমিশন সদস্য',rejected:'কমিশন বাতিল'};
+document.getElementById('tabs').onclick=async e=>{const t=e.target.dataset.tb;if(!t)return;TAB=t;
+  document.querySelectorAll('#tabs .chip').forEach(c=>c.classList.toggle('on',c.dataset.tb===t));
+  $('#pO').style.display=t==='o'?'':'none';$('#pC').style.display=t==='c'?'':'none';$('#pS').style.display=t==='s'?'':'none';
+  try{if(t==='c')await loadCus();if(t==='s')await loadCfg()}catch(x){toast(x.message)}};
+async function loadCus(){const j=await api('list');CUS=j.list;renderCus()}
+function renderCus(){const q=$('#cq').value.trim().toLowerCase();
+  const L=CUS.filter(u=>!q||(u.n+u.p+u.e).toLowerCase().includes(q));
+  $('#cl').innerHTML=L.length?L.map(u=>'<div class="u" data-u="'+esc(u.id)+'"><b>'+esc(u.n||'(নাম নেই)')+'</b><small>'+esc(u.p||'')+' '+esc(u.e||'')+'</small>'
+   +'<span class="tg">'+bn(u.o)+' অর্ডার</span>'+(u.c?'':'<span class="tg y">অ্যাকাউন্ট চালু হয়নি</span>')+(u.q?'<span class="tg r">চালুর আবেদন</span>':'')
+   +(u.cm==='pending'?'<span class="tg r">কমিশন আবেদন</span>':u.cm==='approved'?'<span class="tg">💼 কমিশন সদস্য</span>':'')+'</div>').join(''):'<div class="empty">কোনো কাস্টমার নেই</div>'}
+$('#cq').addEventListener('input',renderCus);
+$('#cl').addEventListener('click',async e=>{const b=e.target.closest('[data-u]');if(!b)return;openU(b.dataset.u)});
+async function openU(id){try{const j=await api('get',{id});const u=j.u,c=u.comm;
+  const od=u.orders.slice(0,15).map(o=>'<div class="r"><span>#'+esc(o.id)+' · '+esc(SB[o.st]||o.st)+'</span><b>'+money(o.total)+'</b></div>').join('')||'<div class="empty" style="padding:8px">অর্ডার নেই</div>';
+  $('#cl').innerHTML='<div class="det"><button class="hb" style="background:var(--g)" id="bk">← ফিরে যান</button><h3 style="margin-top:10px">'+esc(u.name)+'</h3>'
+   +'<div class="r"><span>মোবাইল</span><b>'+esc(u.phone||'-')+'</b></div><div class="r"><span>ইমেইল</span><b>'+esc(u.email||'-')+'</b></div><div class="r"><span>ঠিকানা</span><b>'+esc(u.addr||'-')+'</b></div>'
+   +'<div class="r"><span>অ্যাকাউন্ট</span><b>'+(u.claimed?'চালু':'চালু হয়নি')+'</b></div><div class="r"><span>ব্লগ পড়েছে</span><b>'+bn(u.reads)+'টি</b></div>'
+   +(u.pend?'<div class="note">🔔 অ্যাকাউন্ট চালুর আবেদন — যাচাই কোড: <b>'+esc(u.pend.code)+'</b></div><div class="acts"><button data-x="approve">✅ অনুমোদন</button><button class="del" data-x="reject">❌ বাতিল</button></div>':'')
+   +'<h3 style="margin-top:14px">💼 কমিশন: '+(CM_BN[c.st]||'সদস্য নন')+'</h3>'
+   +(c.st==='approved'?'<div class="r"><span>কোড</span><b>'+esc(c.code)+'</b></div><div class="r"><span>হার</span><b>'+bn(c.rate)+'%</b></div><div class="r"><span>সফল অর্ডার (পণ্যমূল্য)</span><b>'+money(c.ok)+'</b></div><div class="r"><span>পেন্ডিং</span><b>'+money(c.pend)+'</b></div><div class="r"><span>মোট কমিশন</span><b>'+money(c.earned)+'</b></div><div class="r"><span>পরিশোধ</span><b>'+money(c.paid)+'</b></div><div class="r"><span>বাকি</span><b>'+money(c.due)+'</b></div>':'')
+   +'<div class="acts"><button data-x="capprove">✅ কমিশন অনুমোদন / হার বদল</button>'+(c.st==='approved'?'<button data-x="cpay">💸 পরিশোধ লিখুন</button>':'')+'<button class="del" data-x="creject">কমিশন বাতিল</button></div>'
+   +'<h3 style="margin-top:14px">🧾 অর্ডার ('+bn(u.orders.length)+')</h3>'+od
+   +'<div class="acts" style="margin-top:14px"><button data-x="setpw">🔑 পাসওয়ার্ড সেট</button><button data-x="edit">✏️ তথ্য বদল</button><button class="del" data-x="del">🗑 অ্যাকাউন্ট মুছুন</button></div></div>';
+  $('#bk').onclick=()=>loadCus().catch(()=>{});
+  $('#cl').querySelector('.det').onclick=async ev=>{const x=ev.target.dataset.x;if(!x)return;
+   try{
+    if(x==='approve'){await api('approve',{id});toast('অনুমোদিত ✓')}
+    else if(x==='reject'){await api('reject',{id});toast('বাতিল')}
+    else if(x==='capprove'){const r=prompt('কমিশন হার (%)',c.rate===''?CFG.rate||10:c.rate);if(r===null)return;const cd=prompt('রেফারেল কোড (ফাঁকা রাখলে অটো)',c.code||'');if(cd===null)return;const k=await api('cset',{id,st:'approved',rate:r,code:cd});toast('অনুমোদিত ✓ কোড: '+k.code)}
+    else if(x==='creject'){if(!confirm('কমিশন সদস্যপদ বাতিল করবেন?'))return;await api('cset',{id,st:'rejected'});toast('বাতিল')}
+    else if(x==='cpay'){const a=prompt('কত টাকা পরিশোধ করেছেন?');if(!a)return;await api('cpay',{id,amount:a});toast('লেখা হয়েছে ✓')}
+    else if(x==='setpw'){const pw=prompt('নতুন পাসওয়ার্ড (ছোট+বড় হাতের অক্ষর, সংখ্যা ও চিহ্ন, ৮+)');if(!pw)return;await api('setpw',{id,password:pw});toast('পাসওয়ার্ড সেট ✓')}
+    else if(x==='edit'){const n=prompt('নাম',u.name);if(n===null)return;const ph=prompt('মোবাইল',u.phone||'');if(ph===null)return;const em=prompt('ইমেইল',u.email||'');if(em===null)return;const ad=prompt('ঠিকানা',u.addr||'');if(ad===null)return;await api('save',{id,name:n,phone:ph,email:em,addr:ad});toast('সেভ ✓')}
+    else if(x==='del'){if(!confirm('অ্যাকাউন্ট স্থায়ীভাবে মুছবেন?'))return;await api('del',{id});toast('মুছে গেছে');return loadCus()}
+    openU(id)}catch(err){toast(err.message)}};
+ }catch(x){toast(x.message)}}
+async function loadCfg(){const j=await api('cfg');CFG=j.cfg;
+  $('#pS').innerHTML='<div class="det"><h3>⚙️ কমিশন ও পাইকারী সেটিংস</h3><p style="font-size:13px;color:var(--mut);margin:4px 0 10px">নতুন সদস্যের ডিফল্ট কমিশন হার এবং পাইকারী দাম = খুচরা দামের চেয়ে কত % কম।</p>'
+  +'<label>ডিফল্ট কমিশন (%)</label><input class="t" id="cf1" type="number" value="'+esc(CFG.rate)+'"><label>পাইকারী ছাড় (%)</label><input class="t" id="cf2" type="number" value="'+esc(CFG.wsPct)+'"><label>পাইকারী নোট (ঐচ্ছিক, যেমন ন্যূনতম অর্ডার)</label><input class="t" id="cf3" value="'+esc(CFG.wsNote||'')+'"><button class="btn" id="cfs">সেভ করুন</button></div>';
+  $('#cfs').onclick=async()=>{try{await api('cfgset',{rate:$('#cf1').value,wsPct:$('#cf2').value,wsNote:$('#cf3').value});toast('সেভ হয়েছে ✓')}catch(x){toast(x.message)}}}
 const hdr=document.createElement('header');
-hdr.innerHTML='<div class="logo"><img src="logo.png" alt="" onerror="this.remove()"></div><div><h1>PureBite</h1><small>অর্ডার ম্যানেজমেন্ট</small></div><div class="sp"></div><button class="hb" id="rf">↻</button><button class="hb" id="lo">বের হন</button>';
+hdr.innerHTML='<div class="logo"><img src="logo.jpg" alt="" onerror="this.remove()"></div><div><h1>PureBite</h1><small>অর্ডার ম্যানেজমেন্ট</small></div><div class="sp"></div><button class="hb" id="rf">↻</button><button class="hb" id="lo">বের হন</button>';
 hdr.style.display='none';
 document.body.prepend(hdr);
 new MutationObserver(()=>{hdr.style.display=$('#app').style.display==='block'?'flex':'none'}).observe($('#app'),{attributes:true,attributeFilter:['style']});

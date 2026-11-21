@@ -1,67 +1,320 @@
-const H = { 'Cache-Control': 'no-store' };
-const J = (o, s = 200) => Response.json(o, { status: s, headers: H });
-const Z = [['ঢাকা সিটির ভেতরে', 60], ['ঢাকা সিটির বাইরে', 90], ['ঢাকা জেলার বাইরে', 110]];
-const ST = ['নতুন', 'প্যাকিং', 'পাঠানো হয়েছে', 'ডেলিভারি হয়েছে', 'বাতিল'];
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// PureBite — Cloudflare Pages Worker (_worker.js)
+// অর্ডার, কাস্টমার অ্যাকাউন্ট, কমিশন সদস্য, অ্যাডমিন API ও নোটিফিকেশন
+// দরকারি: KV binding নাম "KV", Secret "ADMIN_KEY" (এবং ঐচ্ছিক RESEND_API_KEY, CALLMEBOT_KEY)
 
-// ---------- নোটিফিকেশন (WhatsApp + ইমেইল একসাথে) ----------
-async function notify(env, o) {
-  const lines = o.items.map((i) => `• ${i.n} × ${i.q} = ৳${i.q * i.p}`).join('\n');
-  const text =
-    `🛒 নতুন অর্ডার! ${o.ref}\n\n` +
-    `নাম: ${o.name}\nফোন: ${o.phone}\nঠিকানা: ${o.addr}, ${o.thana}, ${o.dist}\n\n` +
-    `${lines}\n\n` +
-    `পণ্য: ৳${o.sub}${o.cd ? `\nছাড়: ৳${o.cd}` : ''}\nডেলিভারি (${o.zone}): ৳${o.ship}\n` +
-    `মোট: ৳${o.total}\nপেমেন্ট: ${o.pay}` + (o.note ? `\nনোট: ${o.note}` : '');
-  const jobs = [];
-  // WhatsApp (CallMeBot)
-  if (env.CALLMEBOT_KEY) {
-    const ph = env.WA_PHONE || '+8801344628989';
-    jobs.push(
-      fetch(`https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(ph)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(env.CALLMEBOT_KEY)}`).catch(() => {})
-    );
-  }
-  // ইমেইল (Resend)
-  if (env.RESEND_API_KEY) {
-    const to = env.NOTIFY_EMAIL || 'purebite16@gmail.com';
-    const rows = o.items.map((i) => `<tr><td style="padding:6px;border-bottom:1px solid #eee">${esc(i.n)}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:center">${i.q}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:right">৳${i.q * i.p}</td></tr>`).join('');
-    const html =
-      `<div style="font-family:sans-serif;max-width:520px;margin:auto;border:2px solid #c9a24a;border-radius:12px;overflow:hidden">` +
-      `<div style="background:#0f3d2e;color:#e6c675;padding:16px;font-size:20px">🛒 নতুন অর্ডার — ${esc(o.ref)}</div><div style="padding:16px">` +
-      `<p><b>${esc(o.name)}</b><br>📞 ${esc(o.phone)}<br>📍 ${esc(o.addr)}, ${esc(o.thana)}, ${esc(o.dist)}</p>` +
-      `<table style="width:100%;border-collapse:collapse">${rows}</table>` +
-      `<p>পণ্য: ৳${o.sub}${o.cd ? ` | ছাড়: ৳${o.cd}` : ''} | ডেলিভারি (${esc(o.zone)}): ৳${o.ship}</p>` +
-      `<p style="font-size:20px"><b>মোট: ৳${o.total}</b></p><p>পেমেন্ট: ${esc(o.pay)}</p>${o.note ? `<p>নোট: ${esc(o.note)}</p>` : ''}</div></div>`;
-    jobs.push(
-      fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: env.MAIL_FROM || 'PureBite অর্ডার <onboarding@resend.dev>', to: [to], subject: `নতুন অর্ডার ${o.ref} — ৳${o.total} (${o.name})`, html }),
-      }).catch(() => {})
-    );
-  }
-  await Promise.all(jobs);
+const H = { 'Cache-Control': 'no-store' };
+const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Max-Age': '600' };
+const J = (o, s = 200, cors = false) => Response.json(o, { status: s, headers: cors ? { ...H, ...CORS } : H });
+const Z = [['ঢাকা সিটির ভেতরে', 60], ['ঢাকা সিটির বাইরে', 90], ['ঢাকা জেলার বাইরে', 110]];
+const ST = ['new', 'packing', 'shipped', 'delivered', 'cancelled'];
+const ST_BN = { 'নতুন': 'new', 'প্যাকিং': 'packing', 'পাঠানো হয়েছে': 'shipped', 'ডেলিভারি হয়েছে': 'delivered', 'বাতিল': 'cancelled' };
+const normSt = (s) => (ST.includes(s) ? s : ST_BN[s] || 'new');
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const BD = /^01[3-9]\d{8}$/;
+const EM = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
+const te = new TextEncoder();
+
+// ---------- ক্রিপ্টো ----------
+const b64u = (u8) => { let s = ''; for (const c of u8) s += String.fromCharCode(c); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const unb64u = (s) => { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const r = atob(s); const u = new Uint8Array(r.length); for (let i = 0; i < r.length; i++) u[i] = r.charCodeAt(i); return u; };
+const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
+const rndStr = (n, al = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789') => Array.from(rnd(n), (x) => al[x % al.length]).join('');
+const eq = (a, b) => { a = String(a); b = String(b); if (a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; };
+const sha = async (s) => b64u(new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(String(s)))));
+async function pbkdf(pw, salt) {
+  const k = await crypto.subtle.importKey('raw', te.encode(pw), 'PBKDF2', false, ['deriveBits']);
+  return b64u(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, k, 256)));
+}
+async function mkPw(pw) { const salt = rnd(16); return { salt: b64u(salt), hash: await pbkdf(pw, salt) }; }
+async function chkPw(pw, salt, hash) { if (!salt || !hash) return false; return eq(await pbkdf(String(pw), unb64u(salt)), hash); }
+const hkey = (env) => crypto.subtle.importKey('raw', te.encode(env.TOKEN_SECRET || 'pb|' + env.ADMIN_KEY), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+const hsign = async (env, p) => b64u(new Uint8Array(await crypto.subtle.sign('HMAC', await hkey(env), te.encode(p))));
+async function mkTok(env, u) {
+  const p = b64u(te.encode(JSON.stringify({ u: u.id, v: u.pv || 0, e: Math.floor(Date.now() / 1000) + 60 * 86400 })));
+  return p + '.' + (await hsign(env, p));
+}
+async function authUser(env, request) {
+  const h = request.headers.get('Authorization') || '';
+  const t = h.startsWith('Bearer ') ? h.slice(7) : '';
+  const [p, sig] = t.split('.');
+  if (!p || !sig || !(env.ADMIN_KEY || env.TOKEN_SECRET)) return null;
+  if (!eq(await hsign(env, p), sig)) return null;
+  let d;
+  try { d = JSON.parse(new TextDecoder().decode(unb64u(p))); } catch (e) { return null; }
+  if (!d || d.e < Date.now() / 1000) return null;
+  const u = await getU(env, d.u);
+  if (!u || (u.pv || 0) !== d.v) return null;
+  return u;
+}
+async function hit(tag, ip, sec) {
+  const k = new Request('https://rl.local/' + tag + '/' + encodeURIComponent(ip));
+  if (await caches.default.match(k)) return true;
+  await caches.default.put(k, new Response('1', { headers: { 'Cache-Control': 'max-age=' + sec } }));
+  return false;
 }
 
-// ---------- অ্যাডমিন ----------
-async function admin(request, env, u) {
-  if (!env.ADMIN_KEY) return J({ ok: false, m: 'ADMIN_KEY সেট করা নেই' }, 503);
+// ---------- ডেটা (KV) ----------
+const getU = (env, id) => env.KV.get('U:' + id, 'json');
+async function putU(env, u) {
+  const meta = { n: String(u.name || '').slice(0, 30), p: u.phone || '', e: String(u.email || '').slice(0, 60), o: (u.orders || []).length, k: ((u.cart && u.cart.items) || []).length, q: u.pend ? 1 : 0, c: u.claimed ? 1 : 0, cm: (u.comm && u.comm.st) || 'none', t: u.created || 0 };
+  await env.KV.put('U:' + u.id, JSON.stringify(u), { metadata: meta });
+}
+async function findU(env, ident) { if (!ident) return null; const id = await env.KV.get('X:' + ident); return id ? getU(env, id) : null; }
+async function setIdx(env, u) { for (const k of [u.phone, u.email]) if (k) await env.KV.put('X:' + k, u.id); }
+async function affU(env, code) { if (!code) return null; const id = await env.KV.get('AF:' + code); if (!id) return null; const u = await getU(env, id); return u && u.comm && u.comm.st === 'approved' ? u : null; }
+async function getCfg(env) { return { rate: 10, wsPct: 10, wsNote: '', ...((await env.KV.get('CFG', 'json')) || {}) }; }
+const newUser = (o) => ({ id: rndStr(12, 'abcdefghijklmnopqrstuvwxyz0123456789'), name: '', phone: '', email: '', addr: '', created: Date.now(), claimed: false, pv: 0, orders: [], cart: { items: [], ts: 0 }, reads: [], comm: { st: 'none', orders: [] }, ...o });
+function normIdent(s) {
+  s = String(s || '').trim();
+  if (s.includes('@')) return s.toLowerCase().slice(0, 80);
+  return s.replace(/[০-৯]/g, (d) => '০১২৩৪৫৬৭৮৯'.indexOf(d)).replace(/[\s\-().]/g, '').replace(/^\+?88(?=01)/, '');
+}
+const identOk = (i) => (i.includes('@') ? EM.test(i) : BD.test(i));
+const pwErr = (p) => {
+  p = String(p || '');
+  if (p.length < 8 || p.length > 64) return 'পাসওয়ার্ড ৮–৬৪ অক্ষরের হতে হবে';
+  if (!/[a-z]/.test(p) || !/[A-Z]/.test(p) || !/\d/.test(p) || !/[^A-Za-z0-9]/.test(p)) return 'পাসওয়ার্ডে ছোট ও বড় হাতের ইংরেজি অক্ষর, সংখ্যা ও একটি চিহ্ন (@#$!) থাকতে হবে';
+  return '';
+};
+const meOf = (u) => ({ name: u.name, phone: u.phone || '', email: u.email || '', addr: u.addr || '', hasPw: !!u.hash, claimed: !!u.claimed, created: u.created, orders: (u.orders || []).slice(0, 100), cart: u.cart || { items: [], ts: 0 }, reads: (u.reads || []).slice(0, 60), comm: { st: (u.comm && u.comm.st) || 'none' } });
+function commStats(c) {
+  const rate = +c.rate || 0;
+  let ok = 0, pend = 0, nOk = 0, nPend = 0;
+  for (const o of c.orders || []) {
+    if (o.st === 'delivered') { ok += o.b; nOk++; } else if (o.st !== 'cancelled') { pend += o.b; nPend++; }
+  }
+  const earned = Math.round((ok * rate) / 100), paid = +c.paid || 0;
+  return { ok, pend, nOk, nPend, rate, earned, paid, due: Math.max(0, earned - paid), pendComm: Math.round((pend * rate) / 100) };
+}
+
+// ---------- নোটিফিকেশন (WhatsApp + ইমেইল একসাথে) ----------
+async function notifyOwner(env, text, subject, html) {
+  const jobs = [];
+  if (env.CALLMEBOT_KEY) {
+    const ph = env.WA_PHONE || '+8801344628989';
+    jobs.push(fetch(`https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(ph)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(env.CALLMEBOT_KEY)}`).catch(() => {}));
+  }
+  if (env.RESEND_API_KEY) jobs.push(sendMail(env, env.NOTIFY_EMAIL || 'purebite16@gmail.com', subject, html || `<pre style="font-family:sans-serif;font-size:15px">${esc(text)}</pre>`));
+  await Promise.all(jobs);
+}
+const sendMail = (env, to, subject, html) =>
+  fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: env.MAIL_FROM || 'PureBite <onboarding@resend.dev>', to: [to], subject, html }),
+  }).catch(() => {});
+async function notifyOrder(env, o) {
+  const lines = o.items.map((i) => `• ${i.n} × ${i.q} = ৳${i.q * i.p}`).join('\n');
+  const text =
+    `🛒 নতুন অর্ডার! ${o.ref}\n\nনাম: ${o.name}\nফোন: ${o.phone}\nঠিকানা: ${o.addr}, ${o.thana}, ${o.dist}\n\n${lines}\n\n` +
+    `পণ্য: ৳${o.sub}${o.cd ? `\nছাড়: ৳${o.cd}` : ''}\nডেলিভারি (${o.zone}): ৳${o.ship}\nমোট: ৳${o.total}\nপেমেন্ট: ${o.pay}` +
+    (o.aff ? `\nরেফারেল কোড: ${o.aff}` : '') + (o.note ? `\nনোট: ${o.note}` : '');
+  const rows = o.items.map((i) => `<tr><td style="padding:6px;border-bottom:1px solid #eee">${esc(i.n)}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:center">${i.q}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:right">৳${i.q * i.p}</td></tr>`).join('');
+  const html =
+    `<div style="font-family:sans-serif;max-width:520px;margin:auto;border:2px solid #c9a24a;border-radius:12px;overflow:hidden"><div style="background:#0f3d2e;color:#e6c675;padding:16px;font-size:20px">🛒 নতুন অর্ডার — ${esc(o.ref)}</div><div style="padding:16px">` +
+    `<p><b>${esc(o.name)}</b><br>📞 ${esc(o.phone)}<br>📍 ${esc(o.addr)}, ${esc(o.thana)}, ${esc(o.dist)}</p><table style="width:100%;border-collapse:collapse">${rows}</table>` +
+    `<p>পণ্য: ৳${o.sub}${o.cd ? ` | ছাড়: ৳${o.cd}` : ''} | ডেলিভারি (${esc(o.zone)}): ৳${o.ship}</p><p style="font-size:20px"><b>মোট: ৳${o.total}</b></p><p>পেমেন্ট: ${esc(o.pay)}</p>` +
+    `${o.aff ? `<p>রেফারেল কোড: ${esc(o.aff)}</p>` : ''}${o.note ? `<p>নোট: ${esc(o.note)}</p>` : ''}</div></div>`;
+  await notifyOwner(env, text, `নতুন অর্ডার ${o.ref} — ৳${o.total} (${o.name})`, html);
+}
+
+// ---------- অর্ডারের অবস্থা বদল (সব জায়গায় একসাথে) ----------
+async function setOrderSt(env, oid, st) {
+  const o = await env.KV.get(oid, 'json');
+  if (!o) return false;
+  o.st = st;
+  await env.KV.put(oid, JSON.stringify(o));
+  let cu = null;
+  if (o.uid) {
+    cu = await getU(env, o.uid);
+    const s = cu && (cu.orders || []).find((x) => x.id === oid);
+    if (s) { s.st = st; await putU(env, cu); }
+  }
+  if (o.aff) {
+    const id = await env.KV.get('AF:' + o.aff);
+    const au = id && (!cu || cu.id !== id) ? await getU(env, id) : null;
+    const s = au && au.comm && (au.comm.orders || []).find((x) => x.id === oid);
+    if (s) { s.st = st; await putU(env, au); }
+  }
+  return true;
+}
+
+// ---------- কাস্টমার API ----------
+async function userApi(p, request, env, ctx, u0) {
+  if (!(env.ADMIN_KEY || env.TOKEN_SECRET)) return J({ ok: false, m: 'সার্ভারের ADMIN_KEY সেট করা হয়নি' }, 503);
+  const ip = request.headers.get('CF-Connecting-IP') || 'x';
+  const t = await request.text();
+  if (t.length > 20000) return J({ ok: false, m: 'অনুরোধ অনেক বড়' }, 413);
+  let b = {};
+  try { b = JSON.parse(t || '{}') || {}; } catch (e) { return J({ ok: false, m: 'ভুল অনুরোধ' }, 400); }
+  if (b.hp) return J({ ok: false });
+
+  if (p === '/register') {
+    if (await hit('reg', ip, 5)) return J({ ok: false, m: 'একটু অপেক্ষা করে আবার চেষ্টা করুন' }, 429);
+    const name = String(b.name || '').trim().slice(0, 60), ident = normIdent(b.ident), addr = String(b.addr || '').trim().slice(0, 200);
+    if (name.length < 2) return J({ ok: false, m: 'সঠিক নাম লিখুন' });
+    if (!identOk(ident)) return J({ ok: false, m: 'সঠিক ইমেইল বা মোবাইল নম্বর দিন' });
+    if (addr.length < 5) return J({ ok: false, m: 'ঠিকানা লিখুন' });
+    const pe = pwErr(b.password); if (pe) return J({ ok: false, m: pe });
+    const ex = await findU(env, ident);
+    if (ex) {
+      return ex.claimed
+        ? J({ ok: false, e: 'exists', m: 'এই ইমেইল/নম্বরে আগেই অ্যাকাউন্ট আছে। লগইন করুন।' })
+        : J({ ok: false, e: 'unclaimed', m: 'আপনার আগের অর্ডারের অ্যাকাউন্ট আছে। চালু করা হচ্ছে…' });
+    }
+    const pw = await mkPw(b.password);
+    const u = newUser({ name, addr, claimed: true, ...pw, ...(ident.includes('@') ? { email: ident } : { phone: ident }) });
+    await putU(env, u); await setIdx(env, u);
+    return J({ ok: true, token: await mkTok(env, u), me: meOf(u) });
+  }
+
+  if (p === '/login') {
+    if (await hit('login', ip, 2)) return J({ ok: false, m: 'একটু অপেক্ষা করে আবার চেষ্টা করুন' }, 429);
+    const ident = normIdent(b.ident), u = await findU(env, ident);
+    const bad = J({ ok: false, m: 'ইমেইল/মোবাইল বা পাসওয়ার্ড ভুল' });
+    if (!u) return bad;
+    if (!u.claimed) return J({ ok: false, e: 'unclaimed', m: 'আপনার আগের অর্ডারের অ্যাকাউন্ট আছে। "Register account" দিয়ে পাসওয়ার্ড সেট করে চালু করুন।' });
+    if (u.lock && u.lock > Date.now()) return J({ ok: false, m: 'অনেকবার ভুল হয়েছে। ১০ মিনিট পরে চেষ্টা করুন' }, 429);
+    if (!(await chkPw(b.password, u.salt, u.hash))) {
+      u.fails = (u.fails || 0) + 1;
+      if (u.fails >= 5) { u.fails = 0; u.lock = Date.now() + 10 * 60 * 1000; }
+      await putU(env, u);
+      return bad;
+    }
+    if (u.fails || u.lock) { u.fails = 0; u.lock = 0; await putU(env, u); }
+    return J({ ok: true, token: await mkTok(env, u), me: meOf(u) });
+  }
+
+  if (p === '/claim') {
+    if (await hit('claim', ip, 3)) return J({ ok: false, m: 'একটু অপেক্ষা করে আবার চেষ্টা করুন' }, 429);
+    const ident = normIdent(b.ident), u = await findU(env, ident);
+    if (!u) return J({ ok: false, m: 'অ্যাকাউন্ট পাওয়া যায়নি' });
+    if (u.claimed) return J({ ok: false, m: 'এই অ্যাকাউন্ট আগেই চালু আছে। লগইন করুন।' });
+    const pe = pwErr(b.password); if (pe) return J({ ok: false, m: pe });
+    const pw = await mkPw(b.password);
+    const ck = String(b.ck || '');
+    let okCk = false;
+    if (ck) { const h = await sha(ck); okCk = (u.ckh || []).some((x) => eq(x, h)); }
+    if (okCk) {
+      Object.assign(u, pw, { claimed: true, ckh: [], pend: null, pv: (u.pv || 0) + 1 });
+      await putU(env, u);
+      return J({ ok: true, token: await mkTok(env, u), me: meOf(u) });
+    }
+    const code = String(100000 + (rnd(4).reduce((a, x) => a * 256 + x, 0) % 900000));
+    u.pend = { code, ...pw, ts: Date.now() };
+    await putU(env, u);
+    await notifyOwner(env, `🔔 অ্যাকাউন্ট চালুর আবেদন\nনাম: ${u.name}\nমোবাইল: ${u.phone || '-'}\nইমেইল: ${u.email || '-'}\nযাচাই কোড: ${code}\n(কাস্টমার এই কোড WhatsApp-এ পাঠালে অ্যাডমিন পেজ থেকে অনুমোদন দিন)`, `অ্যাকাউন্ট চালুর আবেদন — ${u.name}`).catch(() => {});
+    return J({ ok: true, pending: true, code, phone: u.phone || u.email || ident });
+  }
+
+  if (p === '/otp/send') {
+    const ident = normIdent(b.ident);
+    if (!identOk(ident)) return J({ ok: false, m: 'সঠিক ইমেইল বা মোবাইল নম্বর দিন' });
+    const u = await findU(env, ident);
+    if (!u) return J({ ok: false, e: 'none', m: 'এই ইমেইল/নম্বরে কোনো অ্যাকাউন্ট নেই। রেজিস্ট্রেশন করুন।' });
+    const to = ident.includes('@') ? ident : u.email;
+    if (!to || !env.RESEND_API_KEY) return J({ ok: false, e: 'noprov', m: 'OTP পাঠানোর সেবা এখন চালু নেই। পাসওয়ার্ড দিয়ে লগইন করুন।' });
+    if (await hit('otp', ident, 60)) return J({ ok: false, m: '১ মিনিট পরে আবার চেষ্টা করুন' }, 429);
+    const code = String(100000 + (rnd(4).reduce((a, x) => a * 256 + x, 0) % 900000));
+    await env.KV.put('OTP:' + ident, JSON.stringify({ h: await sha(code + '|' + ident), n: 0 }), { expirationTtl: 300 });
+    await sendMail(env, to, `PureBite যাচাই কোড: ${code}`, `<div style="font-family:sans-serif;font-size:16px">আপনার PureBite যাচাই কোড: <b style="font-size:26px;letter-spacing:3px">${code}</b><br>কোডটি ৫ মিনিট বৈধ। কাউকে জানাবেন না।</div>`);
+    return J({ ok: true });
+  }
+
+  if (p === '/otp/verify') {
+    const ident = normIdent(b.ident), code = String(b.code || '').replace(/\D/g, '');
+    const rec = await env.KV.get('OTP:' + ident, 'json');
+    if (!rec) return J({ ok: false, m: 'কোডের মেয়াদ শেষ। আবার পাঠান।' });
+    if (rec.n >= 5) { await env.KV.delete('OTP:' + ident); return J({ ok: false, m: 'অনেকবার ভুল। নতুন কোড নিন।' }); }
+    if (!eq(rec.h, await sha(code + '|' + ident))) {
+      rec.n++; await env.KV.put('OTP:' + ident, JSON.stringify(rec), { expirationTtl: 300 });
+      return J({ ok: false, m: 'কোড মেলেনি' });
+    }
+    const u = await findU(env, ident);
+    if (!u) return J({ ok: false, m: 'অ্যাকাউন্ট পাওয়া যায়নি' });
+    if (b.password) {
+      const pe = pwErr(b.password); if (pe) return J({ ok: false, m: pe });
+      Object.assign(u, await mkPw(b.password), { claimed: true, pv: (u.pv || 0) + 1, fails: 0, lock: 0, pend: null });
+    } else if (!u.claimed) {
+      u.claimed = true; u.pend = null; // ইমেইল OTP মিলেছে = মালিকানা যাচাই
+    }
+    await env.KV.delete('OTP:' + ident);
+    await putU(env, u);
+    return J({ ok: true, token: await mkTok(env, u), me: meOf(u) });
+  }
+
+  // এখান থেকে লগইন লাগবে
+  const u = u0 || (await authUser(env, request));
+  if (!u || !u.claimed) return J({ ok: false, e: 'auth', m: 'আবার লগইন করুন' }, 401);
+
+  if (p === '/me') return J({ ok: true, me: meOf(u) });
+  if (p === '/me/cart') {
+    const items = (Array.isArray(b.items) ? b.items : []).slice(0, 40).map((i) => ({ n: String(i.n || '').slice(0, 120), s: String(i.s || '').slice(0, 30), q: Math.min(99, Math.max(0, +i.q | 0)), p: Math.min(200000, Math.max(0, +i.p | 0)) })).filter((i) => i.q > 0 && i.n);
+    u.cart = { items, ts: Date.now() };
+    await putU(env, u);
+    return J({ ok: true });
+  }
+  if (p === '/me/read') {
+    const s = String(b.s || '').replace(/[^\w-]/g, '').slice(0, 80);
+    if (!s) return J({ ok: false });
+    u.reads = [{ s, h: String(b.h || '').slice(0, 160), c: String(b.c || '').slice(0, 40), ts: Date.now() }].concat((u.reads || []).filter((x) => x.s !== s)).slice(0, 60);
+    await putU(env, u);
+    return J({ ok: true });
+  }
+  if (p === '/me/update') {
+    const name = String(b.name || '').trim().slice(0, 60), addr = String(b.addr || '').trim().slice(0, 200);
+    if (name.length < 2) return J({ ok: false, m: 'সঠিক নাম লিখুন' });
+    if (addr.length < 5) return J({ ok: false, m: 'ঠিকানা লিখুন' });
+    u.name = name; u.addr = addr;
+    await putU(env, u);
+    return J({ ok: true, me: meOf(u) });
+  }
+  if (p === '/me/password') {
+    if (u.hash && !(await chkPw(b.old, u.salt, u.hash))) return J({ ok: false, m: 'বর্তমান পাসওয়ার্ড ভুল' });
+    const pe = pwErr(b.new); if (pe) return J({ ok: false, m: pe });
+    Object.assign(u, await mkPw(b.new), { pv: (u.pv || 0) + 1 });
+    await putU(env, u);
+    return J({ ok: true, token: await mkTok(env, u) });
+  }
+  if (p === '/me/comm/request') {
+    u.comm = u.comm || { st: 'none', orders: [] };
+    if (u.comm.st === 'approved') return J({ ok: true, st: 'approved' });
+    if (u.comm.st === 'pending' && u.comm.reqTs && Date.now() - u.comm.reqTs < 60000) return J({ ok: true, st: 'pending' });
+    u.comm.st = 'pending'; u.comm.reqTs = Date.now(); u.comm.note = String(b.note || '').slice(0, 200);
+    await putU(env, u);
+    ctx.waitUntil(notifyOwner(env, `💼 কমিশন সদস্য আবেদন\nনাম: ${u.name}\nমোবাইল: ${u.phone || '-'}\nইমেইল: ${u.email || '-'}\n(কাস্টমার কল/WhatsApp করলে অ্যাডমিন পেজ → কাস্টমার থেকে অনুমোদন দিন)`, `কমিশন আবেদন — ${u.name}`).catch(() => {}));
+    return J({ ok: true, st: 'pending' });
+  }
+  if (p === '/me/comm') {
+    const c = u.comm || { st: 'none' };
+    if (c.st !== 'approved') return J({ ok: true, comm: { st: c.st || 'none' } });
+    const cfg = await getCfg(env);
+    const s = commStats(c);
+    return J({ ok: true, comm: { st: 'approved', code: c.code, ...s, orders: (c.orders || []).slice(0, 40), ws: { pct: +cfg.wsPct || 0, note: cfg.wsNote || '' } } });
+  }
+  return J({ ok: false, m: 'not found' }, 404);
+}
+
+// ---------- অ্যাডমিন API ----------
+async function adminApi(request, env, ctx) {
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+  if (!env.ADMIN_KEY) return J({ ok: false, m: 'ADMIN_KEY সেট করা নেই' }, 503, true);
   const ip = request.headers.get('CF-Connecting-IP') || 'x';
   const fk = new Request('https://fail.local/' + encodeURIComponent(ip));
-  if (await caches.default.match(fk)) return J({ ok: false, m: 'কিছুক্ষণ পরে চেষ্টা করুন' }, 429);
-  const given = request.headers.get('x-admin-key') || '';
-  const enc = new TextEncoder();
-  const [a, b] = await Promise.all([crypto.subtle.digest('SHA-256', enc.encode(given)), crypto.subtle.digest('SHA-256', enc.encode(env.ADMIN_KEY))]);
-  const x = new Uint8Array(a), y = new Uint8Array(b);
-  let d = 0;
-  for (let i = 0; i < x.length; i++) d |= x[i] ^ y[i];
-  if (d !== 0) {
+  if (await caches.default.match(fk)) return J({ ok: false, m: 'কিছুক্ষণ পরে চেষ্টা করুন' }, 429, true);
+  const t = await request.text();
+  if (t.length > 30000) return J({ ok: false, m: 'অনুরোধ অনেক বড়' }, 413, true);
+  let b = {};
+  try { b = JSON.parse(t || '{}') || {}; } catch (e) { return J({ ok: false, m: 'ভুল অনুরোধ' }, 400, true); }
+  if (!eq(await sha(b.key || ''), await sha(env.ADMIN_KEY))) {
     await caches.default.put(fk, new Response('1', { headers: { 'Cache-Control': 'max-age=3' } }));
-    return J({ ok: false, m: 'ভুল অ্যাডমিন কী' }, 401);
+    return J({ ok: false, m: 'ভুল অ্যাডমিন কী' }, 401, true);
   }
-  const path = u.pathname.replace(/\/+$/, '');
-  if (path === '/api/admin/orders') {
-    const before = u.searchParams.get('before') || '';
+  const R = (o, s) => J(o, s || 200, true);
+  const a = b.a;
+
+  if (a === 'orders') {
+    const before = String(b.before || '');
     let keys = [], cursor;
     do {
       const r = await env.KV.list({ prefix: 'PB', cursor });
@@ -71,62 +324,185 @@ async function admin(request, env, u) {
     keys.sort();
     if (before) keys = keys.filter((k) => k < before);
     const page = keys.slice(-40).reverse();
-    const vals = await Promise.all(page.map((k) => env.KV.get(k, 'json')));
-    return J({ ok: true, orders: vals.filter(Boolean), more: keys.length > 40 ? page[page.length - 1] : '' });
+    const vals = (await Promise.all(page.map((k) => env.KV.get(k, 'json')))).filter(Boolean).map((o) => ({ ...o, st: normSt(o.st) }));
+    return R({ ok: true, orders: vals, more: keys.length > 40 ? page[page.length - 1] : '' });
   }
-  if (request.method !== 'POST') return J({ ok: false, m: 'method' }, 405);
-  const b2 = await request.json().catch(() => ({}));
-  const ref = String(b2.ref || '');
-  if (!/^PB[0-9A-Z]+$/.test(ref)) return J({ ok: false, m: 'ভুল রেফ' }, 400);
-  if (path === '/api/admin/status') {
-    if (!ST.includes(b2.st)) return J({ ok: false, m: 'ভুল স্ট্যাটাস' }, 400);
-    const o = await env.KV.get(ref, 'json');
-    if (!o) return J({ ok: false, m: 'অর্ডার নেই' }, 404);
-    o.st = b2.st;
-    await env.KV.put(ref, JSON.stringify(o));
-    return J({ ok: true });
+  if (a === 'list') {
+    let L = [], cursor;
+    for (let i = 0; i < 5; i++) {
+      const r = await env.KV.list({ prefix: 'U:', cursor });
+      L = L.concat(r.keys.map((k) => ({ id: k.name.slice(2), ...(k.metadata || {}) })));
+      if (r.list_complete) break;
+      cursor = r.cursor;
+    }
+    L.sort((x, y) => (y.t || 0) - (x.t || 0));
+    return R({ ok: true, list: L.map((x) => ({ id: x.id, n: x.n || '', p: x.p || '', e: x.e || '', o: x.o || 0, k: x.k || 0, q: x.q || 0, c: x.c || 0, cm: x.cm || 'none', t: x.t || 0 })) });
   }
-  if (path === '/api/admin/delete') {
-    await env.KV.delete(ref);
-    return J({ ok: true });
+  if (a === 'cfg') return R({ ok: true, cfg: await getCfg(env) });
+  if (a === 'cfgset') {
+    const c = await getCfg(env);
+    if (b.rate !== undefined) c.rate = Math.min(100, Math.max(0, +b.rate || 0));
+    if (b.wsPct !== undefined) c.wsPct = Math.min(90, Math.max(0, +b.wsPct || 0));
+    if (b.wsNote !== undefined) c.wsNote = String(b.wsNote).slice(0, 400);
+    await env.KV.put('CFG', JSON.stringify(c));
+    return R({ ok: true, cfg: c });
   }
-  return J({ ok: false, m: 'not found' }, 404);
+  if (a === 'ost') {
+    const st = normSt(b.st);
+    if (!ST.includes(st)) return R({ ok: false, m: 'ভুল অবস্থা' }, 400);
+    const oid = String(b.oid || b.ref || '');
+    if (!/^PB[0-9A-Z]+$/.test(oid)) return R({ ok: false, m: 'ভুল রেফ' }, 400);
+    return R((await setOrderSt(env, oid, st)) ? { ok: true } : { ok: false, m: 'অর্ডার নেই' }, 200);
+  }
+  if (a === 'odel') {
+    const oid = String(b.ref || '');
+    if (!/^PB[0-9A-Z]+$/.test(oid)) return R({ ok: false, m: 'ভুল রেফ' }, 400);
+    await setOrderSt(env, oid, 'cancelled').catch(() => {});
+    await env.KV.delete(oid);
+    return R({ ok: true });
+  }
+
+  const id = String(b.id || '').replace(/[^a-z0-9]/g, '');
+  const u = id ? await getU(env, id) : null;
+  if (!u) return R({ ok: false, m: 'অ্যাকাউন্ট পাওয়া যায়নি' }, 404);
+  u.comm = u.comm || { st: 'none', orders: [] };
+
+  if (a === 'get') {
+    const c = u.comm;
+    return R({ ok: true, u: { id: u.id, name: u.name, phone: u.phone, email: u.email, addr: u.addr, claimed: !!u.claimed, created: u.created, pend: u.pend ? { code: u.pend.code } : null, cart: u.cart || { items: [] }, orders: (u.orders || []).map((o) => ({ id: o.id, ts: o.ts, st: o.st, total: o.total, pay: o.pay, dist: o.dist || '', items: o.items || [] })), reads: (u.reads || []).length, comm: { st: c.st || 'none', code: c.code || '', rate: c.rate == null ? '' : c.rate, note: c.note || '', ...commStats(c) } } });
+  }
+  if (a === 'save') {
+    const name = String(b.name || '').trim().slice(0, 60), addr = String(b.addr || '').trim().slice(0, 200);
+    const ph = normIdent(b.phone || ''), em = normIdent(b.email || '');
+    if (name.length < 2) return R({ ok: false, m: 'নাম লিখুন' });
+    if (ph && !BD.test(ph)) return R({ ok: false, m: 'মোবাইল নম্বর ঠিক নয়' });
+    if (em && !EM.test(em)) return R({ ok: false, m: 'ইমেইল ঠিক নয়' });
+    for (const k of [ph, em]) { if (k) { const o = await env.KV.get('X:' + k); if (o && o !== u.id) return R({ ok: false, m: k + ' অন্য অ্যাকাউন্টে আছে' }); } }
+    for (const k of [u.phone, u.email]) if (k && k !== ph && k !== em) await env.KV.delete('X:' + k);
+    Object.assign(u, { name, addr, phone: ph, email: em });
+    await putU(env, u); await setIdx(env, u);
+    return R({ ok: true });
+  }
+  if (a === 'setpw') {
+    const pe = pwErr(b.password); if (pe) return R({ ok: false, m: pe });
+    Object.assign(u, await mkPw(b.password), { claimed: true, pend: null, pv: (u.pv || 0) + 1, fails: 0, lock: 0 });
+    await putU(env, u);
+    return R({ ok: true });
+  }
+  if (a === 'approve') {
+    if (!u.pend) return R({ ok: false, m: 'কোনো আবেদন নেই' });
+    Object.assign(u, { salt: u.pend.salt, hash: u.pend.hash, claimed: true, pend: null, ckh: [], pv: (u.pv || 0) + 1 });
+    await putU(env, u);
+    return R({ ok: true });
+  }
+  if (a === 'reject') { u.pend = null; await putU(env, u); return R({ ok: true }); }
+  if (a === 'del') {
+    for (const k of [u.phone, u.email]) if (k) await env.KV.delete('X:' + k);
+    if (u.comm.code) { const o = await env.KV.get('AF:' + u.comm.code); if (o === u.id) await env.KV.delete('AF:' + u.comm.code); }
+    await env.KV.delete('U:' + u.id);
+    return R({ ok: true });
+  }
+  if (a === 'cset') {
+    const c = u.comm, st = ['approved', 'rejected', 'pending', 'none'].includes(b.st) ? b.st : c.st;
+    const cfg = await getCfg(env);
+    if (b.rate !== undefined && b.rate !== '') c.rate = Math.min(100, Math.max(0, +b.rate || 0));
+    if (c.rate == null) c.rate = cfg.rate;
+    if (st === 'approved') {
+      let code = String(b.code || c.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+      if (code.length < 3) code = 'PB' + rndStr(4);
+      const own = await env.KV.get('AF:' + code);
+      if (own && own !== u.id) return R({ ok: false, m: 'এই কোড অন্য সদস্যের। আলাদা কোড দিন' });
+      if (c.code && c.code !== code) { const o = await env.KV.get('AF:' + c.code); if (o === u.id) await env.KV.delete('AF:' + c.code); }
+      c.code = code;
+      await env.KV.put('AF:' + code, u.id);
+    } else if (c.code) {
+      const o = await env.KV.get('AF:' + c.code);
+      if (o === u.id) await env.KV.delete('AF:' + c.code);
+    }
+    c.st = st;
+    await putU(env, u);
+    return R({ ok: true, code: c.code || '' });
+  }
+  if (a === 'cpay') {
+    const amt = Math.round(+b.amount || 0);
+    if (!(amt > 0)) return R({ ok: false, m: 'টাকার পরিমাণ দিন' });
+    u.comm.paid = (+u.comm.paid || 0) + amt;
+    await putU(env, u);
+    return R({ ok: true });
+  }
+  return R({ ok: false, m: 'not found' }, 404);
 }
+
+// ---------- ওয়েবসাইট থেকে অর্ডার ----------
+async function orderApi(request, env, ctx, u) {
+  if (request.method !== 'POST') return J({ ok: false, m: 'method' }, 405);
+  const og = request.headers.get('Origin');
+  if (og && og !== u.origin) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
+  const rk = new Request('https://rl.local/' + encodeURIComponent(request.headers.get('CF-Connecting-IP') || 'x'));
+  if (await caches.default.match(rk)) return J({ ok: false, m: 'একটু অপেক্ষা করে আবার চেষ্টা করুন' }, 429);
+  try {
+    const t = await request.text();
+    if (t.length > 20000) return J({ ok: false, m: 'অনুরোধ অনেক বড়' }, 413);
+    const b = JSON.parse(t);
+    if (b.hp) return J({ ok: false });
+    const phone = String(b.phone || '').replace(/\D/g, '').slice(-11);
+    const items = (Array.isArray(b.items) ? b.items : []).slice(0, 40).map((i) => ({ n: String(i.n).slice(0, 120), s: String(i.s || '').slice(0, 30), q: +i.q | 0, p: +i.p | 0 }));
+    const name = String(b.name || '').trim().slice(0, 60);
+    if (!/^01[3-9]\d{8}$/.test(phone) || name.length < 2 || !items.length || items.some((i) => i.q < 1 || i.q > 99 || i.p < 0 || i.p > 200000)) return J({ ok: false, m: 'নাম, সঠিক মোবাইল নম্বর ও পণ্যের তথ্য দিন' });
+    const z = Z[b.dz] || ['', 0];
+    const sub = items.reduce((a, i) => a + i.q * i.p, 0), cd = Math.min(sub, Math.max(0, +b.cd | 0)), total = sub - cd + z[1];
+    const ref = 'PB' + Date.now().toString(36).toUpperCase();
+    await caches.default.put(rk, new Response('1', { headers: { 'Cache-Control': 'max-age=15' } }));
+    const addr = String(b.addr || '').slice(0, 200);
+    const mail = normIdent(b.email || '');
+    const em = EM.test(mail) ? mail : '';
+
+    // কাস্টমার অ্যাকাউন্টের সাথে যুক্ত করা
+    let cu = null, ck = '';
+    if (env.ADMIN_KEY || env.TOKEN_SECRET) {
+      cu = await authUser(env, request).catch(() => null);
+      if (!cu) cu = (await findU(env, phone)) || (em ? await findU(env, em) : null);
+      if (!cu) cu = newUser({ name, phone, email: em, addr });
+      if (!cu.claimed) { ck = rndStr(18); cu.ckh = [await sha(ck)].concat(cu.ckh || []).slice(0, 3); }
+      if (!cu.addr) cu.addr = addr;
+      if (!cu.phone && !(await findU(env, phone))) cu.phone = phone;
+      if (!cu.email && em && !(await findU(env, em))) cu.email = em;
+    }
+    // রেফারেল (কমিশন সদস্য)
+    const code = String(b.ref || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+    let au = null;
+    if (code && cu) { au = await affU(env, code); if (au && (au.id === cu.id || au.phone === phone)) au = null; }
+
+    const order = { ref, ts: new Date().toISOString(), name, phone, addr, dist: String(b.dist || '').slice(0, 40), thana: String(b.thana || '').slice(0, 40), pay: String(b.pay || '').slice(0, 60), note: String(b.note || '').slice(0, 300), items, sub, cd, ship: z[1], total, zone: z[0], st: 'new', uid: cu ? cu.id : '', aff: au ? code : '', rc: code };
+    await env.KV.put(ref, JSON.stringify(order));
+    if (cu) {
+      cu.orders = [{ id: ref, ts: Date.now(), st: 'new', total, ship: z[1], pay: order.pay, zone: z[0], dist: order.dist, items: items.map((i) => ({ n: i.n, s: i.s, q: i.q, p: i.p })) }].concat(cu.orders || []).slice(0, 100);
+      await putU(env, cu); await setIdx(env, cu);
+    }
+    if (au) {
+      au.comm.orders = [{ id: ref, ts: Date.now(), st: 'new', b: Math.max(0, sub - cd), n: name.slice(0, 30) }].concat(au.comm.orders || []).slice(0, 300);
+      await putU(env, au);
+    }
+    ctx.waitUntil(notifyOrder(env, order).catch(() => {}));
+    return J({ ok: true, ref, sub, cd, ship: z[1], total, zone: z[0], ...(ck ? { ck } : {}) });
+  } catch (e) {
+    return J({ ok: false, m: 'সার্ভারে সমস্যা হয়েছে। আবার চেষ্টা করুন' }, 500);
+  }
+}
+
+const USER_PATHS = new Set(['/register', '/login', '/claim', '/otp/send', '/otp/verify', '/me', '/me/cart', '/me/read', '/me/update', '/me/password', '/me/comm', '/me/comm/request']);
 
 export default {
   async fetch(request, env, ctx) {
     const u = new URL(request.url);
-    const p = u.pathname.replace(/\/+$/, '');
-    if (p.startsWith('/api/admin/')) {
-      const og0 = request.headers.get('Origin');
-      if (og0 && og0 !== u.origin) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
-      return admin(request, env, u);
+    const p = u.pathname.replace(/\/+$/, '') || '/';
+    if (p === '/admin' && (request.method === 'POST' || request.method === 'OPTIONS')) return adminApi(request, env, ctx);
+    if (p === '/api/orders') return orderApi(request, env, ctx, u);
+    if (USER_PATHS.has(p) && request.method === 'POST') {
+      const og = request.headers.get('Origin');
+      if (og && og !== u.origin) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
+      try { return await userApi(p, request, env, ctx); } catch (e) { return J({ ok: false, m: 'সার্ভারে সমস্যা হয়েছে। আবার চেষ্টা করুন' }, 500); }
     }
-    if (p !== '/api/orders') return env.ASSETS.fetch(request);
-    if (request.method !== 'POST') return J({ ok: false, m: 'method' }, 405);
-    const og = request.headers.get('Origin');
-    if (og && og !== u.origin) return J({ ok: false, m: 'অনুমতি নেই' }, 403);
-    const rk = new Request('https://rl.local/' + encodeURIComponent(request.headers.get('CF-Connecting-IP') || 'x'));
-    if (await caches.default.match(rk)) return J({ ok: false, m: 'একটু অপেক্ষা করে আবার চেষ্টা করুন' }, 429);
-    try {
-      const t = await request.text();
-      if (t.length > 20000) return J({ ok: false, m: 'অনুরোধ অনেক বড়' }, 413);
-      const b = JSON.parse(t);
-      if (b.hp) return J({ ok: false });
-      const phone = String(b.phone || '').replace(/\D/g, '').slice(-11);
-      const items = (Array.isArray(b.items) ? b.items : []).slice(0, 40).map((i) => ({ n: String(i.n).slice(0, 120), s: String(i.s || '').slice(0, 30), q: +i.q | 0, p: +i.p | 0 }));
-      const name = String(b.name || '').trim().slice(0, 60);
-      if (!/^01[3-9]\d{8}$/.test(phone) || name.length < 2 || !items.length || items.some((i) => i.q < 1 || i.q > 99 || i.p < 0 || i.p > 200000)) return J({ ok: false, m: 'নাম, সঠিক মোবাইল নম্বর ও পণ্যের তথ্য দিন' });
-      const z = Z[b.dz] || ['', 0];
-      const sub = items.reduce((a, i) => a + i.q * i.p, 0), cd = Math.min(sub, Math.max(0, +b.cd | 0)), total = sub - cd + z[1];
-      const ref = 'PB' + Date.now().toString(36).toUpperCase();
-      await caches.default.put(rk, new Response('1', { headers: { 'Cache-Control': 'max-age=15' } }));
-      const order = { ref, ts: new Date().toISOString(), name, phone, addr: String(b.addr || '').slice(0, 200), dist: String(b.dist || '').slice(0, 40), thana: String(b.thana || '').slice(0, 40), pay: String(b.pay || '').slice(0, 60), note: String(b.note || '').slice(0, 300), items, sub, cd, ship: z[1], total, zone: z[0], st: 'নতুন' };
-      await env.KV.put(ref, JSON.stringify(order));
-      ctx.waitUntil(notify(env, order).catch(() => {}));
-      return J({ ok: true, ref, sub, cd, ship: z[1], total, zone: z[0] });
-    } catch (e) {
-      return J({ ok: false, m: 'সার্ভারে সমস্যা হয়েছে। আবার চেষ্টা করুন' }, 500);
-    }
+    return env.ASSETS.fetch(request);
   },
 };
