@@ -489,14 +489,14 @@ function junk(t, min) {
   return false;
 }
 async function verifyTurnstile(env, token, ip) {
-  if (!token || token.length > 2100) return false;
+  if (!token || token.length > 2100) return 'no-token';
   try {
     const f = new FormData();
-    f.append('secret', env.TURNSTILE_SECRET); f.append('response', token); if (ip) f.append('remoteip', ip);
+    f.append('secret', String(env.TURNSTILE_SECRET).trim()); f.append('response', token); if (ip) f.append('remoteip', ip);
     const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: f });
     const d = await r.json();
-    return !!(d && d.success);
-  } catch (e) { return false; }
+    return d && d.success ? '' : ((d && d['error-codes'] && d['error-codes'].join(',')) || 'failed');
+  } catch (e) { return 'net-error'; }
 }
 async function phoneLimited(env, phone) {
   const k = 'RL:' + phone;
@@ -550,8 +550,8 @@ async function orderApi(request, env, ctx, u) {
     const addr0 = String(b.addr || '').trim();
     if (junk(name, 2) || junk(addr0, 8)) return J({ ok: false, m: 'সঠিক নাম ও পূর্ণ ঠিকানা লিখুন' });
     if (env.TURNSTILE_SECRET) {
-      const ok = await verifyTurnstile(env, String(b.tt || ''), request.headers.get('CF-Connecting-IP') || '');
-      if (!ok) return J({ ok: false, m: '"আমি রোবট নই" যাচাই সম্পন্ন হয়নি। পেজ রিফ্রেশ করে আবার চেষ্টা করুন' }, 403);
+      const ec = await verifyTurnstile(env, String(b.tt || ''), request.headers.get('CF-Connecting-IP') || '');
+      if (ec) return J({ ok: false, m: '"আমি রোবট নই" যাচাই সম্পন্ন হয়নি (কোড: ' + ec + ')। পেজ রিফ্রেশ করে আবার চেষ্টা করুন' }, 403);
     }
     if (await phoneLimited(env, phone)) return J({ ok: false, m: 'এই নম্বর থেকে অল্প সময়ে অনেক অর্ডার এসেছে। কিছুক্ষণ পরে চেষ্টা করুন বা আমাদের কল করুন' }, 429);
     const z = Z[b.dz];
