@@ -121,7 +121,7 @@ async function notifyOrder(env, o) {
   const text =
     `🛒 নতুন অর্ডার! ${o.ref}\n\nনাম: ${o.name}\nফোন: ${o.phone}\nঠিকানা: ${o.addr}, ${o.thana}, ${o.dist}\n\n${lines}\n\n` +
     `পণ্য: ৳${o.sub}${o.cd ? `\nছাড়: ৳${o.cd}` : ''}\nডেলিভারি (${o.zone}): ৳${o.ship}\nমোট: ৳${o.total}\nপেমেন্ট: ${o.pay}` +
-    (o.aff ? `\nরেফারেল কোড: ${o.aff} (${o.affn || ''}) কমিশন ৳${o.cm || 0}` : '') + (o.note ? `\nনোট: ${o.note}` : '');
+    (o.aff ? `\nরেফারেল কোড: ${o.aff} (${o.affn || ''}) কমিশন ৳${o.cm || 0}` : '') + (o.note ? `\nনোট: ${o.note}` : '') + (o.vp ? '' : '\n⚠️ দাম যাচাই হয়নি (prices.json নেই)');
   const rows = o.items.map((i) => `<tr><td style="padding:6px;border-bottom:1px solid #eee">${esc(i.n)}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:center">${i.q}</td><td style="padding:6px;border-bottom:1px solid #eee;text-align:right">৳${i.q * i.p}</td></tr>`).join('');
   const html =
     `<div style="font-family:sans-serif;max-width:520px;margin:auto;border:2px solid #c9a24a;border-radius:12px;overflow:hidden"><div style="background:#0f3d2e;color:#e6c675;padding:16px;font-size:20px">🛒 নতুন অর্ডার — ${esc(o.ref)}</div><div style="padding:16px">` +
@@ -345,7 +345,7 @@ async function adminApi(request, env, ctx) {
     if (before) keys = keys.filter((k) => k < before);
     const page = keys.slice(-40).reverse();
     const vals = (await Promise.all(page.map((k) => env.KV.get(k, 'json')))).filter(Boolean).map((o) => ({ ...o, st: normSt(o.st) }));
-    return R({ ok: true, orders: vals, more: keys.length > 40 ? page[page.length - 1] : '' });
+    return R({ ok: true, orders: vals, more: keys.length > 40 ? page[page.length - 1] : '', pmis: (await env.KV.get('PMIS', 'json')) || null, pj: !!(await loadPrices(env, new URL(request.url))) });
   }
   if (a === 'list') {
     let L = [], cursor;
@@ -479,6 +479,58 @@ async function adminApi(request, env, ctx) {
   return R({ ok: false, m: 'not found' }, 404);
 }
 
+// ---------- বট/স্প্যাম ও ভ্যালিডেশন ----------
+function junk(t, min) {
+  t = String(t || '').trim();
+  if (t.length < min) return true;
+  if (!/\p{L}/u.test(t)) return true;                 // একটাও অক্ষর নেই (শুধু সংখ্যা/চিহ্ন)
+  if (/^(.)\1{3,}$/u.test(t.replace(/\s/g, ''))) return true; // aaaa, ....
+  if (/^(test|asdf|qwer|xxxx|abc|na|n\/a|none)\b/i.test(t) && t.length < 8) return true;
+  return false;
+}
+async function verifyTurnstile(env, token, ip) {
+  if (!token || token.length > 2100) return false;
+  try {
+    const f = new FormData();
+    f.append('secret', env.TURNSTILE_SECRET); f.append('response', token); if (ip) f.append('remoteip', ip);
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: f });
+    const d = await r.json();
+    return !!(d && d.success);
+  } catch (e) { return false; }
+}
+async function phoneLimited(env, phone) {
+  const k = 'RL:' + phone;
+  const n = +((await env.KV.get(k)) || 0);
+  if (n >= 6) return true;
+  await env.KV.put(k, String(n + 1), { expirationTtl: 3600 });
+  return false;
+}
+// ক্যাটালগ ও prices.json না মিললে অ্যাডমিনকে জানানো (১০ মিনিটে একবার লেখা হয়)
+function pmis(env, ctx, kind, what) {
+  ctx.waitUntil((async () => {
+    if (await hit('pmis', 'g', 600)) return;
+    const o = (await env.KV.get('PMIS', 'json')) || { n: 0 };
+    await env.KV.put('PMIS', JSON.stringify({ ts: Date.now(), n: (o.n || 0) + 1, kind, what: String(what).slice(0, 120) }), { expirationTtl: 3 * 86400 });
+  })().catch(() => {}));
+  return null;
+}
+
+// ---------- সার্ভারের দাম যাচাই (prices.json) ----------
+let PRC = { t: 0, v: null };
+async function loadPrices(env, u) {
+  if (Date.now() - PRC.t < 60000) return PRC.v;
+  let v = null;
+  try {
+    const r = await env.ASSETS.fetch(new Request(u.origin + '/prices.json', { headers: { Accept: 'application/json' } }));
+    if (r.ok && /json|text/.test(r.headers.get('content-type') || '')) {
+      const d = await r.json();
+      if (d && d.items && typeof d.items === 'object') v = { items: d.items, combos: Array.isArray(d.combos) ? d.combos : [] };
+    }
+  } catch (e) { v = null; }
+  PRC = { t: Date.now(), v };
+  return v;
+}
+
 // ---------- ওয়েবসাইট থেকে অর্ডার ----------
 async function orderApi(request, env, ctx, u) {
   if (request.method !== 'POST') return J({ ok: false, m: 'method' }, 405);
@@ -495,8 +547,35 @@ async function orderApi(request, env, ctx, u) {
     const items = (Array.isArray(b.items) ? b.items : []).slice(0, 40).map((i) => ({ n: String(i.n).slice(0, 120), s: String(i.s || '').slice(0, 30), q: +i.q | 0, p: +i.p | 0 }));
     const name = String(b.name || '').trim().slice(0, 60);
     if (!/^01[3-9]\d{8}$/.test(phone) || name.length < 2 || !items.length || items.some((i) => i.q < 1 || i.q > 99 || i.p < 0 || i.p > 200000)) return J({ ok: false, m: 'নাম, সঠিক মোবাইল নম্বর ও পণ্যের তথ্য দিন' });
-    const z = Z[b.dz] || ['', 0];
-    const sub = items.reduce((a, i) => a + i.q * i.p, 0), cd = Math.min(sub, Math.max(0, +b.cd | 0)), total = sub - cd + z[1];
+    const addr0 = String(b.addr || '').trim();
+    if (junk(name, 2) || junk(addr0, 8)) return J({ ok: false, m: 'সঠিক নাম ও পূর্ণ ঠিকানা লিখুন' });
+    if (env.TURNSTILE_SECRET) {
+      const ok = await verifyTurnstile(env, String(b.tt || ''), request.headers.get('CF-Connecting-IP') || '');
+      if (!ok) return J({ ok: false, m: '"আমি রোবট নই" যাচাই সম্পন্ন হয়নি। পেজ রিফ্রেশ করে আবার চেষ্টা করুন' }, 403);
+    }
+    if (await phoneLimited(env, phone)) return J({ ok: false, m: 'এই নম্বর থেকে অল্প সময়ে অনেক অর্ডার এসেছে। কিছুক্ষণ পরে চেষ্টা করুন বা আমাদের কল করুন' }, 429);
+    const z = Z[b.dz];
+    if (!z) return J({ ok: false, m: 'ডেলিভারি এলাকা বাছুন' });
+    // দাম ও ছাড় সার্ভার নিজে যাচাই করে — ব্রাউজারের অঙ্ক বিশ্বাস করে না
+    const pr = await loadPrices(env, u);
+    let vp = 0, cdMax = Infinity;
+    if (pr) {
+      for (const i of items) {
+        const sp = pr.items[i.n];
+        if (sp == null) return pmis(env, ctx, 'unknown', i.n) || J({ ok: false, m: '“' + i.n.slice(0, 40) + '” পণ্যটি এখন পাওয়া যাচ্ছে না। পেজ রিফ্রেশ করে আবার চেষ্টা করুন' });
+        if (i.p !== Math.round(+sp)) return pmis(env, ctx, 'price', i.n + ' (ক্যাটালগে ' + i.p + ', সার্ভারে ' + Math.round(+sp) + ')') || J({ ok: false, m: 'পণ্যের দাম বদলেছে। পেজ রিফ্রেশ (নতুন করে লোড) করে আবার অর্ডার করুন' });
+      }
+      const qty = {};
+      items.forEach((i) => { qty[i.n] = (qty[i.n] || 0) + i.q; });
+      cdMax = 0;
+      for (const c of pr.combos) {
+        if (!Array.isArray(c.items) || !c.items.length) continue;
+        const t = Math.min(...c.items.map((x) => Math.floor((qty[x.n] || 0) / (+x.q || 1))));
+        if (t >= 1) cdMax += (+c.save || 0) * t;
+      }
+      vp = 1;
+    }
+    const sub = items.reduce((a, i) => a + i.q * i.p, 0), cd = Math.min(sub, cdMax, Math.max(0, +b.cd | 0)), total = sub - cd + z[1];
     const ref = 'PB' + Date.now().toString(36).toUpperCase();
     await caches.default.put(rk, new Response('1', { headers: { 'Cache-Control': 'max-age=15' } }));
     const addr = String(b.addr || '').slice(0, 200);
@@ -519,7 +598,7 @@ async function orderApi(request, env, ctx, u) {
     let au = null;
     if (code && cu) { au = await affU(env, code); if (au && (au.id === cu.id || au.phone === phone)) au = null; }
 
-    const order = { ref, ts: new Date().toISOString(), name, phone, addr, dist: String(b.dist || '').slice(0, 40), thana: String(b.thana || '').slice(0, 40), pay: String(b.pay || '').slice(0, 60), note: String(b.note || '').slice(0, 300), items, sub, cd, ship: z[1], total, zone: z[0], st: 'new', uid: cu ? cu.id : '', aff: au ? code : '', rc: code };
+    const order = { ref, ts: new Date().toISOString(), name, phone, addr, dist: String(b.dist || '').slice(0, 40), thana: String(b.thana || '').slice(0, 40), pay: String(b.pay || '').slice(0, 60), note: String(b.note || '').slice(0, 300), items, sub, cd, ship: z[1], total, zone: z[0], vp, st: 'new', uid: cu ? cu.id : '', aff: au ? code : '', rc: code };
     await env.KV.put(ref, JSON.stringify(order));
     if (cu) {
       cu.orders = [{ id: ref, ts: Date.now(), st: 'new', total, ship: z[1], pay: order.pay, zone: z[0], dist: order.dist, items: items.map((i) => ({ n: i.n, s: i.s, q: i.q, p: i.p })) }].concat(cu.orders || []).slice(0, 100);

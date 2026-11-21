@@ -75,6 +75,7 @@ input.t{width:100%;padding:12px;border:1.5px solid #cfd8d2;border-radius:10px;ma
 <div id="app">
   <div class="chips" id="tabs"><button class="chip on" data-tb="o">🧾 অর্ডার</button><button class="chip" data-tb="c">👥 কাস্টমার</button><button class="chip" data-tb="s">⚙️ কমিশন সেটিংস</button></div>
   <div id="pO">
+  <div id="warn"></div>
   <div class="stats">
     <div class="stat"><b id="s1">0</b><span>নতুন অর্ডার</span></div>
     <div class="stat"><b id="s2">0</b><span>আজকের অর্ডার</span></div>
@@ -108,7 +109,7 @@ async function api(a,x){
 async function load(more){
   try{
     const j=await api('orders',more&&MORE?{before:MORE}:{});
-    j.orders.forEach(o=>o.st=SB[o.st]||o.st);ORD=more?ORD.concat(j.orders):j.orders;MORE=j.more;
+    j.orders.forEach(o=>o.st=SB[o.st]||o.st);showWarn(j);ORD=more?ORD.concat(j.orders):j.orders;MORE=j.more;
     $('#login').style.display='none';$('#app').style.display='block';
     try{sessionStorage.setItem('pbk',KEY)}catch(e){}
     render();clearInterval(TIMER);TIMER=setInterval(()=>load(false).catch(()=>{}),60000);
@@ -118,6 +119,10 @@ async function load(more){
     throw e;
   }
 }
+function showWarn(j){let h='';
+  if(j.pj===false)h+='<div class="note" style="background:#fde7e5;border:1px solid var(--red)">⚠️ <b>prices.json</b> সার্ভারে পাওয়া যায়নি, তাই দাম যাচাই বন্ধ আছে। অ্যাপের সেটিংস থেকে prices.json নামিয়ে গিটহাবে আপলোড করুন।</div>';
+  const m=j.pmis;if(m&&Date.now()-m.ts<2*86400000)h+='<div class="note" style="background:#fff3cd;border:1px solid #c9a24a">⚠️ <b>ক্যাটালগ ও prices.json মিলছে না</b> ('+bn(m.n)+' বার, সর্বশেষ '+new Date(m.ts).toLocaleString('bn-BD',{dateStyle:'medium',timeStyle:'short'})+'): '+esc(m.what||'')+'।<br>অ্যাপ থেকে ক্যাটালগ HTML ও prices.json <b>দুটোই</b> নতুন করে নামিয়ে গিটহাবে আপলোড করুন, নইলে কাস্টমারের অর্ডার ফিরে যাচ্ছে।</div>';
+  $('#warn').innerHTML=h}
 function badge(s){return '<span class="badge '+(s==='নতুন'?'n':s==='ডেলিভারি হয়েছে'?'d':s==='বাতিল'?'c':'')+'">'+esc(s)+'</span>'}
 function render(){
   const today=new Date().toDateString();
@@ -143,6 +148,7 @@ function card(o){
   +'<div class="tot"><span>ডেলিভারি ('+esc(o.zone)+')</span><span>'+money(o.ship)+'</span></div>'
   +'<div class="gt"><span>মোট</span><span>'+money(o.total)+'</span></div>'
   +'<div class="tot" style="margin-bottom:8px"><span>পেমেন্ট</span><span>'+esc(o.pay)+'</span></div>'
+  +(o.vp===0||o.vp===undefined?'<div class="note" style="background:#fde7e5">⚠️ দাম সার্ভারে যাচাই হয়নি — কনফার্মের আগে দাম দেখে নিন</div>':'')
   +(o.aff?'<div class="note" style="background:#e8f6ee">🤝 রেফারেল: <b>'+esc(o.aff)+'</b> ('+esc(o.affn||'')+') — সদস্যের কমিশন <b>'+money(o.cm||0)+'</b></div>':'')
   +(o.note?'<div class="note">📝 '+esc(o.note)+'</div>':'')
   +'<div class="acts"><a href="tel:'+ph+'">📞 কল</a><a class="wa" href="'+wa+'?text='+msg+'" target="_blank" rel="noopener">WhatsApp</a>'
